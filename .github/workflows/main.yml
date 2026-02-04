@@ -17,10 +17,8 @@ jobs:
         include:
           - xcode: "16.2"
             ios: "18.2"
-            device: "iPhone 16"
           - xcode: "26.0"
             ios: "26.0"
-            device: "iPhone 16"
 
     steps:
     - name: Checkout
@@ -37,19 +35,77 @@ jobs:
     - name: List available simulators
       run: xcrun simctl list devices available
 
-    - name: Prepare for Swift Package build
-      run: |
-        # Move xcodeproj out of the way so xcodebuild uses Package.swift
-        mv Atlantis.xcodeproj Atlantis.xcodeproj.bak
+    - name: List SwiftPM schemes
+      run: xcodebuild -workspace .swiftpm/xcode/package.xcworkspace -list
 
-    - name: List schemes
-      run: xcodebuild -list
+    - name: Install xcpretty
+      run: sudo gem install xcpretty
+
+    - name: Select iOS simulator for ${{ matrix.ios }}
+      env:
+        IOS_VERSION: ${{ matrix.ios }}
+      run: |
+        set -euo pipefail
+        RUNTIME_ID=$(xcrun simctl list runtimes -j | python - <<'PY'
+        import json, os, sys
+        data = json.load(sys.stdin)
+        target = os.environ["IOS_VERSION"]
+        runtimes = [
+            r for r in data.get("runtimes", [])
+            if r.get("platform") == "iOS"
+            and r.get("isAvailable")
+            and r.get("version", "").startswith(target)
+        ]
+        if not runtimes:
+            print(f"Missing iOS runtime for {target}", file=sys.stderr)
+            sys.exit(1)
+        print(runtimes[0]["identifier"])
+        PY
+        )
+        export RUNTIME_ID
+        DEVICE_ID=$(xcrun simctl list devices -j | python - <<'PY'
+        import json, os, sys
+        data = json.load(sys.stdin)
+        runtime = os.environ["RUNTIME_ID"]
+        devices = data.get("devices", {}).get(runtime, [])
+        for device in devices:
+            if device.get("isAvailable") and "iPhone 16" in device.get("name", ""):
+                print(device["udid"])
+                sys.exit(0)
+        for device in devices:
+            if device.get("isAvailable") and "iPhone" in device.get("name", ""):
+                print(device["udid"])
+                sys.exit(0)
+        print("")
+        PY
+        )
+        if [ -z "$DEVICE_ID" ]; then
+          DEVICE_TYPE=$(xcrun simctl list devicetypes -j | python - <<'PY'
+        import json, sys
+        data = json.load(sys.stdin)
+        devicetypes = [d for d in data.get("devicetypes", []) if d.get("name", "").startswith("iPhone")]
+        for device in devicetypes:
+            if device.get("name") == "iPhone 16":
+                print(device["identifier"])
+                sys.exit(0)
+        if devicetypes:
+            print(devicetypes[0]["identifier"])
+            sys.exit(0)
+        print("", end="")
+        sys.exit(1)
+        PY
+          )
+          DEVICE_ID=$(xcrun simctl create "CI-iPhone-${IOS_VERSION}" "$DEVICE_TYPE" "$RUNTIME_ID")
+        fi
+        echo "SIMULATOR_ID=$DEVICE_ID" >> "$GITHUB_ENV"
 
     - name: Build and Test on iOS ${{ matrix.ios }}
       run: |
+        set -o pipefail
         xcodebuild test \
+          -workspace .swiftpm/xcode/package.xcworkspace \
           -scheme Atlantis \
-          -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=${{ matrix.ios }}" \
+          -destination "id=${SIMULATOR_ID}" \
           -skipPackagePluginValidation \
           -skipMacroValidation \
-          | xcpretty --color || exit ${PIPESTATUS[0]}
+          | xcpretty --color
