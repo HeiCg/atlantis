@@ -37,6 +37,14 @@ jobs:
     - name: List available simulators
       run: xcrun simctl list devices available
 
+    - name: Prepare for Swift Package build
+      run: |
+        # Move xcodeproj out of the way so xcodebuild uses Package.swift
+        mv Atlantis.xcodeproj Atlantis.xcodeproj.bak
+
+    - name: List schemes
+      run: xcodebuild -list
+
     - name: Build and Test on iOS ${{ matrix.ios }}
       run: |
         xcodebuild test \
