@@ -24,7 +24,7 @@ public final class Atlantis: NSObject {
     // MARK: - Components
 
     private weak var delegate: AtlantisDelegate?
-    private let transporter: Transporter
+    private var transporter: Transporter
     private var injector: Injector = NetworkInjector()
     private(set) var configuration: Configuration = Configuration.default()
     private var packages: [String: TrafficPackage] = [:]
@@ -148,6 +148,19 @@ public final class Atlantis: NSObject {
         Atlantis.shared.ignoreProtocols = protocols
     }
 }
+
+#if DEBUG
+extension Atlantis {
+
+    /// Testing-only hook to inject a custom Transporter.
+    static func setTransporterForTesting(_ transporter: Transporter) {
+        retainedTestTransporters.append(Atlantis.shared.transporter)
+        Atlantis.shared.transporter = transporter
+    }
+}
+
+private var retainedTestTransporters: [Transporter] = []
+#endif
 
 // MARK: - Private
 

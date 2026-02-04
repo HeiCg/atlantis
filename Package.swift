@@ -24,6 +24,11 @@ let package = Package(
             dependencies: [],
             path: "Sources",
             resources: [.copy("PrivacyInfo.xcprivacy")])
+        ,
+        .testTarget(
+            name: "AtlantisTests",
+            dependencies: ["Atlantis"],
+            path: "Tests/atlantisTests")
     ],
     swiftLanguageVersions: [.v5]
 )
