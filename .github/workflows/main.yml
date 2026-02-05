@@ -46,9 +46,16 @@ jobs:
         IOS_VERSION: ${{ matrix.ios }}
       run: |
         set -euo pipefail
-        RUNTIME_ID=$(xcrun simctl list runtimes -j | python - <<'PY'
+        RUNTIME_JSON=$(xcrun simctl list runtimes --json 2>/dev/null || true)
+        if [ -z "$RUNTIME_JSON" ]; then
+          echo "Failed to read simctl runtimes JSON"
+          xcrun simctl list runtimes || true
+          exit 1
+        fi
+        export RUNTIME_JSON
+        RUNTIME_ID=$(python3 - <<'PY'
         import json, os, sys
-        data = json.load(sys.stdin)
+        data = json.loads(os.environ["RUNTIME_JSON"])
         target = os.environ["IOS_VERSION"]
         runtimes = [
             r for r in data.get("runtimes", [])
@@ -63,9 +70,16 @@ jobs:
         PY
         )
         export RUNTIME_ID
-        DEVICE_ID=$(xcrun simctl list devices -j | python - <<'PY'
+        DEVICE_JSON=$(xcrun simctl list devices --json 2>/dev/null || true)
+        if [ -z "$DEVICE_JSON" ]; then
+          echo "Failed to read simctl devices JSON"
+          xcrun simctl list devices || true
+          exit 1
+        fi
+        export DEVICE_JSON
+        DEVICE_ID=$(python3 - <<'PY'
         import json, os, sys
-        data = json.load(sys.stdin)
+        data = json.loads(os.environ["DEVICE_JSON"])
         runtime = os.environ["RUNTIME_ID"]
         devices = data.get("devices", {}).get(runtime, [])
         for device in devices:
@@ -80,9 +94,16 @@ jobs:
         PY
         )
         if [ -z "$DEVICE_ID" ]; then
-          DEVICE_TYPE=$(xcrun simctl list devicetypes -j | python - <<'PY'
-        import json, sys
-        data = json.load(sys.stdin)
+          DEVICE_TYPES_JSON=$(xcrun simctl list devicetypes --json 2>/dev/null || true)
+          if [ -z "$DEVICE_TYPES_JSON" ]; then
+            echo "Failed to read simctl device types JSON"
+            xcrun simctl list devicetypes || true
+            exit 1
+          fi
+          export DEVICE_TYPES_JSON
+          DEVICE_TYPE=$(python3 - <<'PY'
+        import json, sys, os
+        data = json.loads(os.environ["DEVICE_TYPES_JSON"])
         devicetypes = [d for d in data.get("devicetypes", []) if d.get("name", "").startswith("iPhone")]
         for device in devicetypes:
             if device.get("name") == "iPhone 16":
