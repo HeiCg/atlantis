@@ -26,7 +26,6 @@ object GzipCompression {
             }
             outputStream.toByteArray()
         } catch (e: Exception) {
-            e.printStackTrace()
             null
         }
     }
@@ -45,7 +44,6 @@ object GzipCompression {
                 gzipStream.readBytes()
             }
         } catch (e: Exception) {
-            e.printStackTrace()
             null
         }
     }
