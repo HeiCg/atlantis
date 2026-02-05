@@ -16,9 +16,7 @@ jobs:
       matrix:
         include:
           - xcode: "16.2"
-            ios: "18.2"
-          - xcode: "26.0"
-            ios: "26.0"
+            ios: "18"
 
     steps:
     - name: Checkout
@@ -61,7 +59,10 @@ jobs:
             r for r in data.get("runtimes", [])
             if r.get("platform") == "iOS"
             and r.get("isAvailable")
-            and r.get("version", "").startswith(target)
+            and (
+                r.get("version", "") == target
+                or r.get("version", "").startswith(target + ".")
+            )
         ]
         if not runtimes:
             print(f"Missing iOS runtime for {target}", file=sys.stderr)
