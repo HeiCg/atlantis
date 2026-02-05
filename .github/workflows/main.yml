@@ -38,7 +38,7 @@ jobs:
           ${{ runner.os }}-swiftpm-
 
     - name: Run SwiftPM Tests
-      run: swift test --test-product AtlantisTests -v
+      run: swift test
 
   android-test:
     name: Android Tests
