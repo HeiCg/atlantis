@@ -40,7 +40,7 @@ class MainActivity : AppCompatActivity() {
     // Retrofit instance using the OkHttpClient
     private val retrofit by lazy {
         Retrofit.Builder()
-            .baseUrl("https://httpbin.org/")
+            .baseUrl("https://httpbin.proxyman.app/")
             .client(okHttpClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
