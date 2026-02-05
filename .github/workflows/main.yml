@@ -9,129 +9,36 @@ on:
       - main
 
 jobs:
-  ios-test:
-    name: iOS Tests
+  swiftpm-test:
+    name: SwiftPM Tests
     runs-on: macos-15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - xcode: "16.2"
-            ios: "18"
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Select Xcode ${{ matrix.xcode }}
-      run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer
+    - name: Select latest Xcode
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: latest-stable
 
     - name: Show Xcode and Swift version
       run: |
         xcodebuild -version
         swift --version
 
-    - name: List available simulators
-      run: xcrun simctl list devices available
+    - name: Cache SwiftPM
+      uses: actions/cache@v4
+      with:
+        path: |
+          .build
+          ~/Library/Caches/org.swift.swiftpm
+        key: ${{ runner.os }}-swiftpm-${{ hashFiles('Package.swift', 'Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-swiftpm-
 
-    - name: List SwiftPM schemes
-      run: xcodebuild -workspace .swiftpm/xcode/package.xcworkspace -list
-
-    - name: Install xcpretty
-      run: sudo gem install xcpretty
-
-    - name: Select iOS simulator for ${{ matrix.ios }}
-      env:
-        IOS_VERSION: ${{ matrix.ios }}
-      run: |
-        set -euo pipefail
-        RUNTIME_JSON=$(xcrun simctl list runtimes --json 2>/dev/null || true)
-        if [ -z "$RUNTIME_JSON" ]; then
-          echo "Failed to read simctl runtimes JSON"
-          xcrun simctl list runtimes || true
-          exit 1
-        fi
-        export RUNTIME_JSON
-        RUNTIME_ID=$(python3 - <<'PY'
-        import json, os, sys
-        data = json.loads(os.environ["RUNTIME_JSON"])
-        target = os.environ["IOS_VERSION"]
-        runtimes = [
-            r for r in data.get("runtimes", [])
-            if r.get("platform") == "iOS"
-            and r.get("isAvailable")
-            and (
-                r.get("version", "") == target
-                or r.get("version", "").startswith(target + ".")
-            )
-        ]
-        if not runtimes:
-            print(f"Missing iOS runtime for {target}", file=sys.stderr)
-            sys.exit(1)
-        print(runtimes[0]["identifier"])
-        PY
-        )
-        export RUNTIME_ID
-        DEVICE_JSON=$(xcrun simctl list devices --json 2>/dev/null || true)
-        if [ -z "$DEVICE_JSON" ]; then
-          echo "Failed to read simctl devices JSON"
-          xcrun simctl list devices || true
-          exit 1
-        fi
-        export DEVICE_JSON
-        DEVICE_ID=$(python3 - <<'PY'
-        import json, os, sys
-        data = json.loads(os.environ["DEVICE_JSON"])
-        runtime = os.environ["RUNTIME_ID"]
-        devices = data.get("devices", {}).get(runtime, [])
-        for device in devices:
-            if device.get("isAvailable") and "iPhone 16" in device.get("name", ""):
-                print(device["udid"])
-                sys.exit(0)
-        for device in devices:
-            if device.get("isAvailable") and "iPhone" in device.get("name", ""):
-                print(device["udid"])
-                sys.exit(0)
-        print("")
-        PY
-        )
-        if [ -z "$DEVICE_ID" ]; then
-          DEVICE_TYPES_JSON=$(xcrun simctl list devicetypes --json 2>/dev/null || true)
-          if [ -z "$DEVICE_TYPES_JSON" ]; then
-            echo "Failed to read simctl device types JSON"
-            xcrun simctl list devicetypes || true
-            exit 1
-          fi
-          export DEVICE_TYPES_JSON
-          DEVICE_TYPE=$(python3 - <<'PY'
-        import json, sys, os
-        data = json.loads(os.environ["DEVICE_TYPES_JSON"])
-        devicetypes = [d for d in data.get("devicetypes", []) if d.get("name", "").startswith("iPhone")]
-        for device in devicetypes:
-            if device.get("name") == "iPhone 16":
-                print(device["identifier"])
-                sys.exit(0)
-        if devicetypes:
-            print(devicetypes[0]["identifier"])
-            sys.exit(0)
-        print("", end="")
-        sys.exit(1)
-        PY
-          )
-          DEVICE_ID=$(xcrun simctl create "CI-iPhone-${IOS_VERSION}" "$DEVICE_TYPE" "$RUNTIME_ID")
-        fi
-        echo "SIMULATOR_ID=$DEVICE_ID" >> "$GITHUB_ENV"
-
-    - name: Build and Test on iOS ${{ matrix.ios }}
-      run: |
-        set -o pipefail
-        xcodebuild test \
-          -workspace .swiftpm/xcode/package.xcworkspace \
-          -scheme Atlantis \
-          -destination "id=${SIMULATOR_ID}" \
-          -skipPackagePluginValidation \
-          -skipMacroValidation \
-          | xcpretty --color
+    - name: Run SwiftPM Tests
+      run: swift test --test-product AtlantisTests -v
 
   android-test:
     name: Android Tests
