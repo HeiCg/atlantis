@@ -6,6 +6,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.proxyman.atlantis.Atlantis
+import com.proxyman.atlantis.Transporter
 import com.proxyman.atlantis.sample.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -29,6 +30,24 @@ class MainActivity : AppCompatActivity() {
     }
     
     private lateinit var binding: ActivityMainBinding
+    private var connectionState: String? = null
+
+    private val connectionListener = object : Transporter.ConnectionListener {
+        override fun onConnected(host: String, port: Int) {
+            connectionState = "Connected to Proxyman at $host:$port"
+            runOnUiThread { updateStatus() }
+        }
+
+        override fun onDisconnected() {
+            connectionState = "Disconnected. Looking for Proxyman..."
+            runOnUiThread { updateStatus() }
+        }
+
+        override fun onConnectionFailed(error: String) {
+            connectionState = "Connection failed: $error"
+            runOnUiThread { updateStatus() }
+        }
+    }
     
     // OkHttpClient with Atlantis interceptor
     private val okHttpClient by lazy {
@@ -55,7 +74,13 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         
+        Atlantis.setConnectionListener(connectionListener)
         setupUI()
+    }
+
+    override fun onDestroy() {
+        Atlantis.setConnectionListener(null)
+        super.onDestroy()
     }
     
     private fun setupUI() {
@@ -83,10 +108,11 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun updateStatus() {
-        val status = if (Atlantis.isRunning()) {
-            "Atlantis is running.\nLooking for Proxyman..."
-        } else {
+        val status = if (!Atlantis.isRunning()) {
             "Atlantis is not running"
+        } else {
+            val detail = connectionState ?: "Looking for Proxyman..."
+            "Atlantis is running.\n$detail"
         }
         binding.tvStatus.text = status
     }

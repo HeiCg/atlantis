@@ -9,6 +9,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -279,7 +280,7 @@ class Transporter(
                 val compressedData = package_.toCompressedData() ?: return@withContext
                 
                 // Create length header (8 bytes, UInt64)
-                val lengthBuffer = ByteBuffer.allocate(8)
+                val lengthBuffer = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
                 lengthBuffer.putLong(compressedData.size.toLong())
                 val headerData = lengthBuffer.array()
                 

@@ -7,6 +7,11 @@ import org.junit.Test
 class MessageTest {
     
     private val gson = Gson()
+
+    private fun extractContent(json: String): String? {
+        val map = gson.fromJson(json, Map::class.java)
+        return map["content"] as? String
+    }
     
     @Test
     fun `test MessageType serialization`() {
@@ -26,6 +31,12 @@ class MessageTest {
         assertTrue(json!!.contains("\"messageType\":\"connection\""))
         assertTrue(json.contains("\"id\":\"test-id\""))
         assertTrue(json.contains("\"buildVersion\""))
+
+        val content = extractContent(json)
+        assertNotNull(content)
+        val decoded = Base64Utils.decode(content!!).toString(Charsets.UTF_8)
+        val expectedPayload = gson.toJson(testPackage)
+        assertEquals(expectedPayload, decoded)
     }
     
     @Test
@@ -38,6 +49,12 @@ class MessageTest {
         
         assertTrue(json!!.contains("\"messageType\":\"traffic\""))
         assertTrue(json.contains("\"id\":\"traffic-id\""))
+
+        val content = extractContent(json)
+        assertNotNull(content)
+        val decoded = Base64Utils.decode(content!!).toString(Charsets.UTF_8)
+        val expectedPayload = gson.toJson(testPackage)
+        assertEquals(expectedPayload, decoded)
     }
     
     @Test
@@ -50,6 +67,12 @@ class MessageTest {
         
         assertTrue(json!!.contains("\"messageType\":\"websocket\""))
         assertTrue(json.contains("\"id\":\"ws-id\""))
+
+        val content = extractContent(json)
+        assertNotNull(content)
+        val decoded = Base64Utils.decode(content!!).toString(Charsets.UTF_8)
+        val expectedPayload = gson.toJson(testPackage)
+        assertEquals(expectedPayload, decoded)
     }
     
     // Helper test class

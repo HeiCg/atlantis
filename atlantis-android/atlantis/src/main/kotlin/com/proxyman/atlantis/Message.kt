@@ -50,7 +50,7 @@ data class Message(
          */
         fun buildConnectionMessage(id: String, item: Serializable): Message {
             val contentData = item.toData()
-            val contentString = contentData?.toString(Charsets.UTF_8)
+            val contentString = contentData?.let { Base64Utils.encode(it) }
             return Message(
                 id = id,
                 messageType = MessageType.CONNECTION,
@@ -64,7 +64,7 @@ data class Message(
          */
         fun buildTrafficMessage(id: String, item: Serializable): Message {
             val contentData = item.toData()
-            val contentString = contentData?.toString(Charsets.UTF_8)
+            val contentString = contentData?.let { Base64Utils.encode(it) }
             return Message(
                 id = id,
                 messageType = MessageType.TRAFFIC,
@@ -78,7 +78,7 @@ data class Message(
          */
         fun buildWebSocketMessage(id: String, item: Serializable): Message {
             val contentData = item.toData()
-            val contentString = contentData?.toString(Charsets.UTF_8)
+            val contentString = contentData?.let { Base64Utils.encode(it) }
             return Message(
                 id = id,
                 messageType = MessageType.WEBSOCKET,
