@@ -18,6 +18,7 @@
 - [x] ✅ Capture WS/WSS Traffic from URLSessionWebSocketTask
 - [x] Capture gRPC traffic (Advanced)
 - [x] Support iOS Physical Devices and Simulators, including iPhone, iPad, Apple Watch, Apple TV
+- [x] **NEW:** Support Android with OkHttp, Retrofit, and Apollo
 - [x] Review traffic log from macOS [Proxyman](https://proxyman.com) app ([Github](https://github.com/ProxymanApp/Proxyman))
 - [x] Categorize the log by project and devices.
 - [x] Ready for Production
@@ -29,10 +30,22 @@
 - If you want to use debugging tools, please use normal Proxy.
 
 ## Requirement
+
+### iOS
 - macOS Proxyman app
 - iOS 16.0+ / macOS 11+ / Mac Catalyst 13.0+ / tvOS 13.0+ / watchOS 10.0+
 - Xcode 14+
 - Swift 5.0+
+
+### Android
+- macOS Proxyman app
+- Android API 26+ (Android 8.0 Oreo)
+- OkHttp 4.x or 5.x
+- Kotlin 1.9+
+
+---
+
+# iOS Integration
 
 ## 👉 How to use
 ### 1. Install Atlantis framework
@@ -472,6 +485,160 @@ Atlantis.start()
 
 </details>
 
+---
+
+# Android Integration
+
+Atlantis for Android captures HTTP/HTTPS traffic from OkHttp (including Retrofit and Apollo) and sends it to Proxyman for debugging.
+
+## 1. Install Atlantis Android
+
+### Gradle (Kotlin DSL)
+
+Add to your app's `build.gradle.kts`:
+
+```kotlin
+dependencies {
+    debugImplementation("com.proxyman:atlantis-android:1.0.0")
+    
+    // You must include OkHttp in your project
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+}
+```
+
+### Gradle (Groovy)
+
+```groovy
+dependencies {
+    debugImplementation 'com.proxyman:atlantis-android:1.0.0'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}
+```
+
+### JitPack (Alternative)
+
+Add JitPack repository to your `settings.gradle.kts`:
+
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+```
+
+Then add the dependency:
+
+```kotlin
+debugImplementation("com.github.ProxymanApp:atlantis:1.0.0")
+```
+
+## 2. Initialize Atlantis
+
+### In your Application class
+
+```kotlin
+import android.app.Application
+import com.proxyman.atlantis.Atlantis
+
+class MyApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        
+        // Only enable in debug builds
+        if (BuildConfig.DEBUG) {
+            // Simple start - discovers all Proxyman apps on network
+            Atlantis.start(this)
+            
+            // Or with specific hostname (find it in Proxyman -> Certificate menu)
+            // Atlantis.start(this, "MacBook-Pro.local")
+        }
+    }
+}
+```
+
+## 3. Add Interceptor to OkHttpClient
+
+```kotlin
+import com.proxyman.atlantis.Atlantis
+import okhttp3.OkHttpClient
+
+// Create OkHttpClient with Atlantis interceptor
+val okHttpClient = OkHttpClient.Builder()
+    .addInterceptor(Atlantis.getInterceptor())
+    .build()
+```
+
+### With Retrofit
+
+```kotlin
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+
+val retrofit = Retrofit.Builder()
+    .baseUrl("https://api.example.com/")
+    .client(okHttpClient)  // Use the OkHttpClient with Atlantis
+    .addConverterFactory(GsonConverterFactory.create())
+    .build()
+```
+
+### With Apollo Kotlin
+
+```kotlin
+import com.apollographql.apollo3.ApolloClient
+
+val apolloClient = ApolloClient.Builder()
+    .serverUrl("https://api.example.com/graphql")
+    .okHttpClient(okHttpClient)  // Use the OkHttpClient with Atlantis
+    .build()
+```
+
+## 4. Required Permissions
+
+Atlantis requires these permissions (automatically added by the library):
+
+```xml
+<uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+```
+
+## 5. Start Debugging
+
+1. Open **Proxyman** on your Mac
+2. Make sure your Android device/emulator and Mac are on the **same Wi-Fi network**
+   - For emulators: Atlantis automatically connects to `10.0.2.2:10909`
+   - For physical devices: Uses Network Service Discovery (NSD/mDNS)
+3. Run your Android app
+4. All HTTP/HTTPS traffic will appear in Proxyman!
+
+## Android Sample App
+
+A sample Android app is included in `atlantis-android/sample/`. To run it:
+
+1. Open `atlantis-android/` in Android Studio
+2. Run the `sample` module
+3. Tap the buttons to make network requests
+4. View the traffic in Proxyman
+
+## Android Troubleshooting
+
+### Traffic not appearing in Proxyman?
+
+1. **Emulator**: Make sure Proxyman is running on your Mac. Atlantis connects to `10.0.2.2:10909`.
+
+2. **Physical device**: 
+   - Ensure both devices are on the same Wi-Fi network
+   - Try specifying the hostname: `Atlantis.start(this, "Your-Mac.local")`
+
+3. **Check logs**: Look for `[Atlantis]` logs in Logcat for connection status.
+
+### OkHttp version compatibility
+
+Atlantis supports OkHttp 4.x and 5.x. If you're using an older version, please upgrade.
+
+---
 
 ## ❓ FAQ 
 #### 1. How does Atlantis work?
