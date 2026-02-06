@@ -38,10 +38,7 @@
 - Swift 5.0+
 
 ### Android
-- macOS Proxyman app
-- Android API 26+ (Android 8.0 Oreo)
-- OkHttp 4.x or 5.x
-- Kotlin 1.9+
+- See [Atlantis Android](https://github.com/ProxymanApp/atlantis-android) for Android integration.
 
 ---
 
@@ -485,6 +482,8 @@ Atlantis.start()
 
 Atlantis for Android captures HTTP/HTTPS traffic from OkHttp (including Retrofit and Apollo) and sends it to Proxyman for debugging.
 
+> Source code: [github.com/ProxymanApp/atlantis-android](https://github.com/ProxymanApp/atlantis-android)
+
 ## 1. Install Atlantis Android
 
 ### Gradle (Kotlin DSL)
@@ -524,7 +523,7 @@ dependencyResolutionManagement {
 Then add the dependency:
 
 ```kotlin
-debugImplementation("com.github.ProxymanApp:atlantis:1.0.0")
+debugImplementation("com.github.ProxymanApp:atlantis-android:1.0.0")
 ```
 
 ## 2. Initialize Atlantis
@@ -609,9 +608,9 @@ Atlantis requires these permissions (automatically added by the library):
 
 ## Android Sample App
 
-A sample Android app is included in `atlantis-android/sample/`. To run it:
+A sample Android app is included in the [atlantis-android](https://github.com/ProxymanApp/atlantis-android) repo. To run it:
 
-1. Open `atlantis-android/` in Android Studio
+1. Clone [atlantis-android](https://github.com/ProxymanApp/atlantis-android) and open it in Android Studio
 2. Run the `sample` module
 3. Tap the buttons to make network requests
 4. View the traffic in Proxyman
