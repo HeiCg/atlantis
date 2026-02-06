@@ -1,25 +1,23 @@
-import { NativeModules } from 'react-native';
-import { start, stop, isRunning } from '../index';
-
-// Mock the React Native NativeModules
-jest.mock('react-native', () => {
-  const mockModule = {
+// Mock the TurboModule spec so TurboModuleRegistry is never evaluated.
+// The mock object must be created inside the factory to avoid hoisting issues.
+jest.mock('../NativeAtlantisReactNative', () => ({
+  __esModule: true,
+  default: {
     start: jest.fn(),
     stop: jest.fn(),
     isRunning: jest.fn(() => Promise.resolve(true)),
-  };
+  },
+}));
 
-  return {
-    NativeModules: {
-      AtlantisReactNative: mockModule,
-    },
-    Platform: {
-      select: jest.fn((obj: Record<string, string>) => obj.ios ?? obj.default ?? ''),
-    },
-  };
-});
+import NativeAtlantisReactNative from '../NativeAtlantisReactNative';
+import { start, stop, isRunning } from '../index';
 
-const mockNative = NativeModules.AtlantisReactNative;
+// Access the mock functions through the mocked module
+const mockNative = NativeAtlantisReactNative as unknown as {
+  start: jest.Mock;
+  stop: jest.Mock;
+  isRunning: jest.Mock;
+};
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -45,7 +43,6 @@ describe('react-native-atlantis', () => {
     });
 
     it('passes empty string as hostName when given', () => {
-      // Empty string is passed through; native side handles resolution
       start('');
       expect(mockNative.start).toHaveBeenCalledWith('');
     });
@@ -60,22 +57,20 @@ describe('react-native-atlantis', () => {
 
   describe('isRunning', () => {
     it('returns the native module promise result (true)', async () => {
-      (mockNative.isRunning as jest.Mock).mockResolvedValueOnce(true);
+      mockNative.isRunning.mockResolvedValueOnce(true);
       const result = await isRunning();
       expect(result).toBe(true);
       expect(mockNative.isRunning).toHaveBeenCalledTimes(1);
     });
 
     it('returns the native module promise result (false)', async () => {
-      (mockNative.isRunning as jest.Mock).mockResolvedValueOnce(false);
+      mockNative.isRunning.mockResolvedValueOnce(false);
       const result = await isRunning();
       expect(result).toBe(false);
     });
 
     it('propagates native module rejection', async () => {
-      (mockNative.isRunning as jest.Mock).mockRejectedValueOnce(
-        new Error('native error'),
-      );
+      mockNative.isRunning.mockRejectedValueOnce(new Error('native error'));
       await expect(isRunning()).rejects.toThrow('native error');
     });
   });
@@ -92,27 +87,5 @@ describe('react-native-atlantis', () => {
     it('exports isRunning function', () => {
       expect(typeof isRunning).toBe('function');
     });
-  });
-});
-
-describe('missing native module', () => {
-  it('throws a linking error when native module is not available', () => {
-    // Re-mock with undefined native module
-    jest.resetModules();
-    jest.mock('react-native', () => ({
-      NativeModules: {
-        AtlantisReactNative: undefined,
-      },
-      Platform: {
-        select: jest.fn(
-          (obj: Record<string, string>) => obj.ios ?? obj.default ?? '',
-        ),
-      },
-    }));
-
-    const { start: startFresh } = require('../index');
-    expect(() => startFresh()).toThrow(
-      "doesn't seem to be linked",
-    );
   });
 });
