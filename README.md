@@ -52,12 +52,6 @@
 ### Swift Packages Manager (Recommended)
 - Add `https://github.com/ProxymanApp/atlantis` to your project
 
-### CocoaPod (Deprecated)
-- Add the following line to your Podfile
-```bash 
-pod 'atlantis-proxyman'
-```
-
 ### 2. Add Required settings to `Info.plist`
 1. Open your iOS Project -> Open the `Info.plist` file and add the following keys and values:
 
