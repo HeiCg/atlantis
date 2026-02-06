@@ -77,6 +77,12 @@ class AtlantisInterceptor internal constructor() : Interceptor {
             throw e
         }
         
+        // Skip WebSocket upgrade responses (101 Switching Protocols).
+        // WebSocket traffic is handled entirely by AtlantisWebSocketListener.
+        if (response.code == 101) {
+            return response
+        }
+
         // Request succeeded, now capture the response (best effort)
         try {
             val (atlantisResponse, responseBodyData) = captureResponse(response)

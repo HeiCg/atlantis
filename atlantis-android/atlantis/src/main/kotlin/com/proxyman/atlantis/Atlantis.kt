@@ -2,7 +2,12 @@ package com.proxyman.atlantis
 
 import android.content.Context
 import android.util.Log
+import okhttp3.Headers
+import okhttp3.Request as OkHttpRequest
+import okhttp3.Response as OkHttpResponse
+import okhttp3.WebSocketListener
 import java.lang.ref.WeakReference
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -60,6 +65,12 @@ object Atlantis {
     
     private val isEnabled = AtomicBoolean(false)
     private val interceptor = AtlantisInterceptor()
+
+    // MARK: - WebSocket caches (mirrors iOS Atlantis.swift)
+
+    private val webSocketPackages = ConcurrentHashMap<String, TrafficPackage>()
+    private val waitingWebsocketPackages = ConcurrentHashMap<String, MutableList<TrafficPackage>>()
+    private val wsLock = Any()
     
     // MARK: - Public API
     
@@ -118,6 +129,11 @@ object Atlantis {
         transporter = null
         configuration = null
         contextRef = null
+
+        synchronized(wsLock) {
+            webSocketPackages.clear()
+            waitingWebsocketPackages.clear()
+        }
         
         Log.d(TAG, "Atlantis stopped")
     }
@@ -165,6 +181,20 @@ object Atlantis {
     fun setConnectionListener(listener: Transporter.ConnectionListener?) {
         transporter?.connectionListener = listener
     }
+
+    /**
+     * Wrap an OkHttp WebSocketListener to capture WebSocket messages and send them to Proxyman.
+     *
+     * Usage:
+     * ```kotlin
+     * val listener = Atlantis.wrapWebSocketListener(object : WebSocketListener() { ... })
+     * client.newWebSocket(request, listener)
+     * ```
+     */
+    @JvmStatic
+    fun wrapWebSocketListener(listener: WebSocketListener): AtlantisWebSocketListener {
+        return AtlantisWebSocketListener(listener)
+    }
     
     // MARK: - Internal API (used by AtlantisInterceptor)
     
@@ -185,6 +215,205 @@ object Atlantis {
         val message = Message.buildTrafficMessage(configuration.id, trafficPackage)
         
         transporter?.send(message)
+    }
+
+    // MARK: - Internal API (used by AtlantisWebSocketListener)
+
+    internal fun onWebSocketOpen(id: String, request: OkHttpRequest, response: OkHttpResponse) {
+        if (!isEnabled.get()) return
+
+        val configuration = configuration ?: return
+        val transporter = transporter ?: return
+
+        val atlantisRequest = Request.fromOkHttp(
+            url = request.url.toString(),
+            method = request.method,
+            headers = headersToSingleValueMap(request.headers),
+            body = null
+        )
+
+        val atlantisResponse = Response.fromOkHttp(
+            statusCode = response.code,
+            headers = headersToSingleValueMap(response.headers)
+        )
+
+        val now = System.currentTimeMillis() / 1000.0
+
+        val basePackage: TrafficPackage
+        synchronized(wsLock) {
+            basePackage = TrafficPackage(
+                id = id,
+                startAt = now,
+                request = atlantisRequest,
+                response = atlantisResponse,
+                responseBodyData = "",
+                endAt = now,
+                packageType = TrafficPackage.PackageType.WEBSOCKET
+            )
+            webSocketPackages[id] = basePackage
+        }
+
+        // Send the initial traffic message to register the WebSocket connection in Proxyman.
+        // This mirrors iOS: handleDidFinish sends a traffic-type message for the HTTP upgrade.
+        val trafficMessage = Message.buildTrafficMessage(configuration.id, basePackage)
+        transporter.send(trafficMessage)
+
+        // Flush any queued messages that happened before onOpen
+        attemptSendingAllWaitingWSPackages(id)
+    }
+
+    internal fun onWebSocketSendText(id: String, text: String) {
+        sendWebSocketMessage(
+            id = id
+        ) { WebsocketMessagePackage.createStringMessage(id = id, message = text, type = WebsocketMessagePackage.MessageType.SEND) }
+    }
+
+    internal fun onWebSocketSendBinary(id: String, bytes: ByteArray) {
+        sendWebSocketMessage(
+            id = id
+        ) { WebsocketMessagePackage.createDataMessage(id = id, data = bytes, type = WebsocketMessagePackage.MessageType.SEND) }
+    }
+
+    internal fun onWebSocketReceiveText(id: String, text: String) {
+        sendWebSocketMessage(
+            id = id
+        ) { WebsocketMessagePackage.createStringMessage(id = id, message = text, type = WebsocketMessagePackage.MessageType.RECEIVE) }
+    }
+
+    internal fun onWebSocketReceiveBinary(id: String, bytes: ByteArray) {
+        sendWebSocketMessage(
+            id = id
+        ) { WebsocketMessagePackage.createDataMessage(id = id, data = bytes, type = WebsocketMessagePackage.MessageType.RECEIVE) }
+    }
+
+    internal fun onWebSocketClosing(id: String, code: Int, reason: String?) {
+        if (!isEnabled.get()) return
+        val configuration = configuration ?: return
+        val transporter = transporter ?: return
+
+        // Atomically remove the base package so only the FIRST close call sends a message.
+        // Subsequent calls (proxy close, onClosing callback, onClosed callback) will find
+        // nothing in the cache and return early.
+        val basePackage = synchronized(wsLock) {
+            val pkg = webSocketPackages.remove(id) ?: return
+            waitingWebsocketPackages.remove(id)
+            pkg
+        }
+
+        val wsPackage = WebsocketMessagePackage.createCloseMessage(id = id, closeCode = code, reason = reason)
+        val messageTrafficPackage = basePackage.copy(websocketMessagePackage = wsPackage)
+
+        val delegate = delegate?.get()
+        if (delegate is AtlantisWebSocketDelegate) {
+            delegate.onWebSocketMessageCaptured(messageTrafficPackage)
+        }
+
+        val message = Message.buildWebSocketMessage(configuration.id, messageTrafficPackage)
+        transporter.send(message)
+    }
+
+    internal fun onWebSocketClosed(id: String, code: Int, reason: String?) {
+        // Ensure close message is sent (idempotent: onWebSocketClosing no-ops if already removed)
+        onWebSocketClosing(id, code, reason)
+    }
+
+    internal fun onWebSocketFailure(id: String, t: Throwable, response: OkHttpResponse?) {
+        if (!isEnabled.get()) return
+        val responseInfo = response?.let { " HTTP ${it.code}" } ?: ""
+        Log.e(TAG, "WebSocket failure (id=$id)$responseInfo: ${t.message ?: t.javaClass.simpleName}", t)
+        // Best effort: clean up local caches. Transporter will handle reconnect/pending queue.
+        synchronized(wsLock) {
+            webSocketPackages.remove(id)
+            waitingWebsocketPackages.remove(id)
+        }
+    }
+
+    private fun sendWebSocketMessage(
+        id: String,
+        wsPackageBuilder: () -> WebsocketMessagePackage
+    ) {
+        if (!isEnabled.get()) return
+
+        val configuration = configuration ?: return
+        val transporter = transporter ?: return
+
+        val basePackage = synchronized(wsLock) { webSocketPackages[id] } ?: return
+
+        val wsPackage = try {
+            wsPackageBuilder()
+        } catch (_: Exception) {
+            return
+        }
+
+        // Create a snapshot package per message to avoid mutating the cached basePackage.
+        // This is critical because Transporter queues Serializable objects by reference.
+        val messageTrafficPackage = basePackage.copy(websocketMessagePackage = wsPackage)
+
+        // Notify delegate
+        val delegate = delegate?.get()
+        if (delegate is AtlantisWebSocketDelegate) {
+            delegate.onWebSocketMessageCaptured(messageTrafficPackage)
+        }
+
+        startSendingWebsocketMessage(
+            configurationId = configuration.id,
+            transporter = transporter,
+            package_ = messageTrafficPackage
+        )
+    }
+
+    private fun startSendingWebsocketMessage(
+        configurationId: String,
+        transporter: Transporter,
+        package_: TrafficPackage
+    ) {
+        val id = package_.id
+
+        synchronized(wsLock) {
+            // If WS response isn't ready yet, queue it (mirrors iOS waitingWebsocketPackages)
+            if (package_.response == null) {
+                val waitingList = waitingWebsocketPackages[id] ?: mutableListOf()
+                waitingList.add(package_)
+                waitingWebsocketPackages[id] = waitingList
+                return
+            }
+        }
+
+        // Send all waiting WS packages (if any)
+        attemptSendingAllWaitingWSPackages(id)
+
+        val message = Message.buildWebSocketMessage(configurationId, package_)
+        transporter.send(message)
+    }
+
+    private fun attemptSendingAllWaitingWSPackages(id: String) {
+        val transporter = transporter ?: return
+        val messagesToSend: List<Message> = synchronized(wsLock) {
+            val configurationId = configuration?.id ?: return
+            val waitingList = waitingWebsocketPackages.remove(id) ?: return
+            val baseResponse = webSocketPackages[id]?.response
+
+            waitingList.map { item ->
+                val toSend = if (item.response == null && baseResponse != null) {
+                    item.copy(response = baseResponse)
+                } else {
+                    item
+                }
+                Message.buildWebSocketMessage(configurationId, toSend)
+            }
+        }
+
+        messagesToSend.forEach { transporter.send(it) }
+    }
+
+    private fun headersToSingleValueMap(headers: Headers): Map<String, String> {
+        if (headers.size == 0) return emptyMap()
+        val map = LinkedHashMap<String, String>(headers.size)
+        for (name in headers.names()) {
+            val values = headers.values(name)
+            map[name] = values.joinToString(",")
+        }
+        return map
     }
     
     // MARK: - Private Methods
@@ -211,4 +440,14 @@ interface AtlantisDelegate {
      * This is called on a background thread
      */
     fun onTrafficCaptured(trafficPackage: TrafficPackage)
+}
+
+/**
+ * Optional delegate for observing captured WebSocket traffic packages.
+ *
+ * This is separate from [AtlantisDelegate] to avoid breaking existing implementers
+ * (especially Java implementations) when adding new callbacks.
+ */
+interface AtlantisWebSocketDelegate {
+    fun onWebSocketMessageCaptured(trafficPackage: TrafficPackage)
 }

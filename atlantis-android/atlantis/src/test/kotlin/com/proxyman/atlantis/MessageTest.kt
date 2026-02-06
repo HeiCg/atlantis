@@ -74,6 +74,36 @@ class MessageTest {
         val expectedPayload = gson.toJson(testPackage)
         assertEquals(expectedPayload, decoded)
     }
+
+    @Test
+    fun `test build websocket message with TrafficPackage payload`() {
+        val request = Request.fromOkHttp(
+            url = "wss://echo.websocket.org/",
+            method = "GET",
+            headers = emptyMap(),
+            body = null
+        )
+
+        val trafficPackage = TrafficPackage.createWebSocket(request).apply {
+            response = Response.fromOkHttp(101, mapOf("Upgrade" to "websocket"))
+            websocketMessagePackage = WebsocketMessagePackage.createStringMessage(
+                id = id,
+                message = "hello",
+                type = WebsocketMessagePackage.MessageType.RECEIVE
+            )
+        }
+
+        val message = Message.buildWebSocketMessage("config-id", trafficPackage)
+        val json = message.toData()!!.toString(Charsets.UTF_8)
+        val content = extractContent(json)!!
+        val decoded = Base64Utils.decode(content).toString(Charsets.UTF_8)
+
+        assertTrue(json.contains("\"messageType\":\"websocket\""))
+        assertTrue(decoded.contains("\"packageType\":\"websocket\""))
+        assertTrue(decoded.contains("\"websocketMessagePackage\""))
+        assertTrue(decoded.contains("\"messageType\":\"receive\""))
+        assertTrue(decoded.contains("\"stringValue\":\"hello\""))
+    }
     
     // Helper test class
     private class TestSerializable(val content: String) : Serializable {

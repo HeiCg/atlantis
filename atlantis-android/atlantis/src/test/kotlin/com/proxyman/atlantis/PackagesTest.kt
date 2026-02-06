@@ -128,6 +128,49 @@ class PackagesTest {
         assertNull(trafficPackage.error)
         assertEquals(TrafficPackage.PackageType.HTTP, trafficPackage.packageType)
     }
+
+    @Test
+    fun `test TrafficPackage WebSocket creation`() {
+        val request = Request.fromOkHttp(
+            url = "wss://echo.websocket.org/",
+            method = "GET",
+            headers = mapOf("Sec-WebSocket-Protocol" to "chat"),
+            body = null
+        )
+
+        val trafficPackage = TrafficPackage.createWebSocket(request)
+
+        assertNotNull(trafficPackage.id)
+        assertTrue(trafficPackage.startAt > 0)
+        assertEquals(request, trafficPackage.request)
+        assertEquals(TrafficPackage.PackageType.WEBSOCKET, trafficPackage.packageType)
+        assertNull(trafficPackage.websocketMessagePackage)
+    }
+
+    @Test
+    fun `test TrafficPackage WebSocket serialization with websocketMessagePackage`() {
+        val request = Request.fromOkHttp(
+            url = "wss://echo.websocket.org/",
+            method = "GET",
+            headers = emptyMap(),
+            body = null
+        )
+
+        val trafficPackage = TrafficPackage.createWebSocket(request)
+        trafficPackage.response = Response.fromOkHttp(101, mapOf("Upgrade" to "websocket"))
+        trafficPackage.websocketMessagePackage =
+            WebsocketMessagePackage.createStringMessage(
+                id = trafficPackage.id,
+                message = "hello",
+                type = WebsocketMessagePackage.MessageType.SEND
+            )
+
+        val json = trafficPackage.toData()!!.toString(Charsets.UTF_8)
+        assertTrue(json.contains("\"packageType\":\"websocket\""))
+        assertTrue(json.contains("\"websocketMessagePackage\""))
+        assertTrue(json.contains("\"messageType\":\"send\""))
+        assertTrue(json.contains("\"stringValue\":\"hello\""))
+    }
     
     @Test
     fun `test TrafficPackage serialization`() {

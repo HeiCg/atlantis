@@ -192,6 +192,46 @@ class AtlantisInterceptorTest {
     }
     
     @Test
+    fun `test interceptor skips WebSocket upgrade 101 response`() {
+        // Return a 101 Switching Protocols response (WebSocket upgrade)
+        mockWebServer.enqueue(MockResponse()
+            .setResponseCode(101)
+            .addHeader("Upgrade", "websocket")
+            .addHeader("Connection", "Upgrade"))
+
+        val request = Request.Builder()
+            .url(mockWebServer.url("/ws"))
+            .get()
+            .addHeader("Connection", "Upgrade")
+            .addHeader("Upgrade", "websocket")
+            .build()
+
+        val response = client.newCall(request).execute()
+
+        // Verify the interceptor does not interfere with the 101 response
+        assertEquals(101, response.code)
+        assertEquals("websocket", response.header("Upgrade"))
+    }
+
+    @Test
+    fun `test interceptor still captures non-101 responses`() {
+        // A normal 200 response must still be captured (not skipped)
+        mockWebServer.enqueue(MockResponse()
+            .setResponseCode(200)
+            .setBody("{\"ok\":true}"))
+
+        val request = Request.Builder()
+            .url(mockWebServer.url("/api/health"))
+            .get()
+            .build()
+
+        val response = client.newCall(request).execute()
+
+        assertEquals(200, response.code)
+        assertEquals("{\"ok\":true}", response.body?.string())
+    }
+
+    @Test
     fun `test multiple concurrent requests`() {
         // Enqueue multiple responses
         repeat(5) { i ->

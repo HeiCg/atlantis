@@ -67,7 +67,10 @@ data class TrafficPackage(
     var endAt: Double? = null,
     
     @SerializedName("packageType")
-    val packageType: PackageType = PackageType.HTTP
+    val packageType: PackageType = PackageType.HTTP,
+    
+    @SerializedName("websocketMessagePackage")
+    var websocketMessagePackage: WebsocketMessagePackage? = null
 ) : Serializable {
     
     enum class PackageType {
@@ -97,7 +100,20 @@ data class TrafficPackage(
             return TrafficPackage(
                 id = UUID.randomUUID().toString(),
                 startAt = System.currentTimeMillis() / 1000.0,
-                request = request
+                request = request,
+                packageType = PackageType.HTTP
+            )
+        }
+        
+        /**
+         * Create a new WebSocket TrafficPackage with a unique ID
+         */
+        fun createWebSocket(request: Request): TrafficPackage {
+            return TrafficPackage(
+                id = UUID.randomUUID().toString(),
+                startAt = System.currentTimeMillis() / 1000.0,
+                request = request,
+                packageType = PackageType.WEBSOCKET
             )
         }
     }

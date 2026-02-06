@@ -31,6 +31,8 @@ class MainActivity : AppCompatActivity() {
     
     private lateinit var binding: ActivityMainBinding
     private var connectionState: String? = null
+    private var httpLog: String = ""
+    private var wsLog: String = ""
 
     private val connectionListener = object : Transporter.ConnectionListener {
         override fun onConnected(host: String, port: Int) {
@@ -49,11 +51,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
     
-    // OkHttpClient with Atlantis interceptor
-    private val okHttpClient by lazy {
-        OkHttpClient.Builder()
-            .addInterceptor(Atlantis.getInterceptor())
-            .build()
+    // OkHttpClient shared from Application (also used by WebSocket test)
+    private val okHttpClient: OkHttpClient by lazy {
+        (application as SampleApplication).okHttpClient
     }
     
     // Retrofit instance using the OkHttpClient
@@ -76,6 +76,8 @@ class MainActivity : AppCompatActivity() {
         
         Atlantis.setConnectionListener(connectionListener)
         setupUI()
+
+        observeWebSocketLogs()
     }
 
     override fun onDestroy() {
@@ -103,8 +105,13 @@ class MainActivity : AppCompatActivity() {
         binding.btnErrorRequest.setOnClickListener {
             makeErrorRequest()
         }
+
+        binding.btnStartWebSocketTest.setOnClickListener {
+            WebSocketTestController.startAutoTest(okHttpClient)
+        }
         
         updateStatus()
+        updateLogView()
     }
     
     private fun updateStatus() {
@@ -115,6 +122,34 @@ class MainActivity : AppCompatActivity() {
             "Atlantis is running.\n$detail"
         }
         binding.tvStatus.text = status
+    }
+
+    private fun observeWebSocketLogs() {
+        lifecycleScope.launch {
+            WebSocketTestController.logText.collect { text ->
+                wsLog = text
+                updateLogView()
+            }
+        }
+
+        lifecycleScope.launch {
+            WebSocketTestController.isTestRunning.collect { running ->
+                binding.btnStartWebSocketTest.isEnabled = !running
+            }
+        }
+    }
+
+    private fun updateLogView() {
+        val combined = buildString {
+            if (httpLog.isNotBlank()) {
+                append("=== HTTP ===\n")
+                append(httpLog)
+                append("\n\n")
+            }
+            append("=== WebSocket (auto every 1s) ===\n")
+            append(if (wsLog.isNotBlank()) wsLog else "(no websocket logs yet)")
+        }
+        binding.tvResult.text = combined
     }
     
     private fun makeGetRequest() {
@@ -208,7 +243,8 @@ class MainActivity : AppCompatActivity() {
     private fun showResult(title: String, result: String) {
         Log.d(TAG, "$title: $result")
         runOnUiThread {
-            binding.tvResult.text = "$title:\n\n${result.take(500)}..."
+            httpLog = "$title:\n\n${result.take(500)}"
+            updateLogView()
             Toast.makeText(this, "$title completed!", Toast.LENGTH_SHORT).show()
         }
     }
@@ -216,7 +252,8 @@ class MainActivity : AppCompatActivity() {
     private fun showError(title: String, e: Exception) {
         Log.e(TAG, title, e)
         runOnUiThread {
-            binding.tvResult.text = "$title:\n\nError: ${e.message}"
+            httpLog = "$title:\n\nError: ${e.message}"
+            updateLogView()
             Toast.makeText(this, "$title: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
