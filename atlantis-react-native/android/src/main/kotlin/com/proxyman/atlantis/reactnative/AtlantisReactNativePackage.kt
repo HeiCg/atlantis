@@ -1,25 +1,40 @@
 package com.proxyman.atlantis.reactnative
 
-import com.facebook.react.ReactPackage
+import com.facebook.react.TurboReactPackage
 import com.facebook.react.bridge.NativeModule
 import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.uimanager.ViewManager
+import com.facebook.react.module.model.ReactModuleInfo
+import com.facebook.react.module.model.ReactModuleInfoProvider
 
 /**
- * React Native package that registers the AtlantisReactNativeModule.
+ * React Native TurboModule package that registers the AtlantisReactNativeModule.
  * Auto-linked by React Native's autolinking mechanism.
  */
-class AtlantisReactNativePackage : ReactPackage {
+class AtlantisReactNativePackage : TurboReactPackage() {
 
-    override fun createNativeModules(
+    override fun getModule(
+        name: String,
         reactContext: ReactApplicationContext
-    ): List<NativeModule> {
-        return listOf(AtlantisReactNativeModule(reactContext))
+    ): NativeModule? {
+        return if (name == AtlantisReactNativeModule.NAME) {
+            AtlantisReactNativeModule(reactContext)
+        } else {
+            null
+        }
     }
 
-    override fun createViewManagers(
-        reactContext: ReactApplicationContext
-    ): List<ViewManager<*, *>> {
-        return emptyList()
+    override fun getReactModuleInfoProvider(): ReactModuleInfoProvider {
+        return ReactModuleInfoProvider {
+            mapOf(
+                AtlantisReactNativeModule.NAME to ReactModuleInfo(
+                    AtlantisReactNativeModule.NAME,
+                    AtlantisReactNativeModule.NAME,
+                    false, // canOverrideExistingModule
+                    false, // needsEagerInit
+                    false, // isCxxModule
+                    true   // isTurboModule
+                )
+            )
+        }
     }
 }

@@ -1,11 +1,12 @@
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("com.facebook.react")
 }
 
 android {
     namespace = "com.proxyman.atlantis.reactnative"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 26

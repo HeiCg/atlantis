@@ -1,21 +1,4 @@
-import { NativeModules, Platform } from 'react-native';
-
-const LINKING_ERROR =
-  `The package 'react-native-atlantis' doesn't seem to be linked. Make sure: \n\n` +
-  Platform.select({ ios: "- You have run 'pod install'\n", default: '' }) +
-  '- You rebuilt the app after installing the package\n' +
-  '- You are not using Expo Go\n';
-
-const AtlantisModule = NativeModules.AtlantisReactNative
-  ? NativeModules.AtlantisReactNative
-  : new Proxy(
-      {},
-      {
-        get() {
-          throw new Error(LINKING_ERROR);
-        },
-      }
-    );
+import NativeAtlantisReactNative from './NativeAtlantisReactNative';
 
 /**
  * Start Atlantis and begin capturing HTTP/HTTPS traffic.
@@ -29,7 +12,7 @@ const AtlantisModule = NativeModules.AtlantisReactNative
  *   Example: 'MacBook-Pro.local'
  */
 export function start(hostName?: string): void {
-  AtlantisModule.start(hostName ?? null);
+  NativeAtlantisReactNative.start(hostName ?? null);
 }
 
 /**
@@ -38,7 +21,7 @@ export function start(hostName?: string): void {
  * Disconnects from Proxyman and stops all network interception.
  */
 export function stop(): void {
-  AtlantisModule.stop();
+  NativeAtlantisReactNative.stop();
 }
 
 /**
@@ -47,5 +30,5 @@ export function stop(): void {
  * @returns Promise that resolves to true if Atlantis is active.
  */
 export function isRunning(): Promise<boolean> {
-  return AtlantisModule.isRunning();
+  return NativeAtlantisReactNative.isRunning();
 }

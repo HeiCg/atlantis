@@ -1,24 +1,30 @@
 package com.proxyman.atlantis.reactnative
 
+import com.facebook.fbreact.specs.NativeAtlantisReactNativeSpec
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.bridge.ReactContextBaseJavaModule
-import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.modules.network.OkHttpClientProvider
 import com.proxyman.atlantis.Atlantis
 
 /**
- * React Native native module that bridges to the Atlantis Android library.
+ * React Native TurboModule that bridges to the Atlantis Android library.
  *
  * Exposes start(), stop(), and isRunning() to JavaScript.
  * On start(), it registers an OkHttpClientFactory that injects the
  * AtlantisInterceptor into React Native's networking layer.
+ *
+ * Extends the codegen-generated NativeAtlantisReactNativeSpec for
+ * New Architecture (TurboModule) compatibility.
  */
 class AtlantisReactNativeModule(
     private val reactContext: ReactApplicationContext
-) : ReactContextBaseJavaModule(reactContext) {
+) : NativeAtlantisReactNativeSpec(reactContext) {
 
-    override fun getName(): String = "AtlantisReactNative"
+    override fun getName(): String = NAME
+
+    companion object {
+        const val NAME = "AtlantisReactNative"
+    }
 
     /**
      * Start Atlantis and begin capturing HTTP/HTTPS traffic.
@@ -30,8 +36,7 @@ class AtlantisReactNativeModule(
      *
      * @param hostName Optional hostname to connect to a specific Proxyman instance
      */
-    @ReactMethod
-    fun start(hostName: String?) {
+    override fun start(hostName: String?) {
         // Inject AtlantisInterceptor into React Native's OkHttp client
         OkHttpClientProvider.setOkHttpClientFactory(
             AtlantisOkHttpInterceptorFactory()
@@ -45,16 +50,14 @@ class AtlantisReactNativeModule(
     /**
      * Stop Atlantis and cease capturing traffic.
      */
-    @ReactMethod
-    fun stop() {
+    override fun stop() {
         Atlantis.stop()
     }
 
     /**
      * Check if Atlantis is currently running.
      */
-    @ReactMethod
-    fun isRunning(promise: Promise) {
+    override fun isRunning(promise: Promise) {
         promise.resolve(Atlantis.isRunning())
     }
 }
