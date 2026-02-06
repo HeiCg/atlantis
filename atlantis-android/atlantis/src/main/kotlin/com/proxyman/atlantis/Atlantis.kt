@@ -43,7 +43,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - Network Service Discovery to find Proxyman
  * - Direct connection support for emulators
  * 
- * @see <a href="https://proxyman.io">Proxyman</a>
+ * @see <a href="https://proxyman.com">Proxyman</a>
  * @see <a href="https://github.com/ProxymanApp/atlantis">GitHub Repository</a>
  */
 object Atlantis {

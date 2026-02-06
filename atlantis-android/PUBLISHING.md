@@ -145,7 +145,7 @@ afterEvaluate {
                         developer {
                             id.set("proxymanllc")
                             name.set("Proxyman LLC")
-                            email.set("support@proxyman.io")
+                            email.set("support@proxyman.com")
                         }
                     }
                     
