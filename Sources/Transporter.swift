@@ -36,6 +36,61 @@ extension Serializable {
     }
 }
 
+/// A per-connection serial send queue that provides TCP backpressure.
+/// Sends one framed message at a time, waiting for the NWConnection completion
+/// handler before dequeuing the next. This prevents overwhelming the receiver
+/// under high-traffic bursts.
+private final class ConnectionSendQueue {
+    private let connection: NWConnection
+    private let dispatchQueue: DispatchQueue
+    private var buffer: [Data] = []
+    private var isSending = false
+    private let maxBufferSize = 50
+
+    init(connection: NWConnection, queue: DispatchQueue) {
+        self.connection = connection
+        self.dispatchQueue = queue
+    }
+
+    /// Enqueue a framed message (header + compressed data already concatenated).
+    /// Must be called on dispatchQueue.
+    func enqueue(_ framedData: Data) {
+        // Drop oldest if buffer is full
+        while buffer.count >= maxBufferSize {
+            buffer.removeFirst()
+        }
+        buffer.append(framedData)
+        dequeueNextIfIdle()
+    }
+
+    /// Resume draining after connection becomes .ready.
+    /// Must be called on dispatchQueue.
+    func resume() {
+        dequeueNextIfIdle()
+    }
+
+    /// Send the next message if not currently sending.
+    private func dequeueNextIfIdle() {
+        guard !isSending, !buffer.isEmpty else { return }
+        guard connection.state == .ready else { return }
+
+        isSending = true
+        let data = buffer.removeFirst()
+
+        connection.send(content: data, completion: .contentProcessed({ [weak self] error in
+            guard let self = self else { return }
+            self.dispatchQueue.async {
+                self.isSending = false
+                if let error = error {
+                    print("[\(self.connection.endpoint.debugDescription)][Error] Send error: \(error)")
+                    return
+                }
+                self.dequeueNextIfIdle()
+            }
+        }))
+    }
+}
+
 final class NetServiceTransport: NSObject {
 
     struct Constants {
@@ -56,7 +111,14 @@ final class NetServiceTransport: NSObject {
     private var config: Configuration?
 
     // Multiple task connection support using NWConnection
-    private var connections: [NWConnection] = []
+    // Maps ObjectIdentifier(NWConnection) -> (connection, sendQueue) to avoid
+    // endpoint-based equality issues during reconnection.
+    private var connectionQueues: [ObjectIdentifier: (connection: NWConnection, sendQueue: ConnectionSendQueue)] = [:]
+
+    // Convenience accessor for all active connections
+    private var connections: [NWConnection] {
+        connectionQueues.values.map { $0.connection }
+    }
 
     // The maximum number of pending item to prevent Atlantis consumes too much RAM
     private let maxPendingItem = 50
@@ -64,6 +126,10 @@ final class NetServiceTransport: NSObject {
     // Retry mechanism for simulator direct connection
     private var simulatorRetryCount = 0
     private let maxSimulatorRetries = 5
+
+    // Retry mechanism for real device reconnection
+    private var deviceRetryCount = 0
+    private let maxDeviceRetries = 5
 
     // MARK: - Init
 
@@ -152,28 +218,16 @@ extension NetServiceTransport: Transporter {
             return
         }
 
-        // Compose a message
-        // [1]: the length of the second message. We reserver 8 bytes to store this data
-        // [2]: The actual message
+        // Build framed message: [8-byte UInt64 length header][compressed data]
+        // Concatenating into a single Data is wire-compatible since TCP is a stream protocol.
+        var framedData = Data(capacity: MemoryLayout<UInt64>.size + data.count)
+        var length = UInt64(data.count)
+        framedData.append(Data(bytes: &length, count: MemoryLayout<UInt64>.size))
+        framedData.append(data)
 
-        // 1. Send length of the message first
-        let headerData = NSMutableData()
-        var lengthPackage = UInt64(data.count) // Use UInt64 for length
-        headerData.append(&lengthPackage, length: MemoryLayout<UInt64>.size)
-
-        // Send the length header, must use isComplete = false
-        connection.send(content: headerData as Data, isComplete: false, completion: .contentProcessed({ error in
-            if let error = error {
-                print("[\(connection.endpoint.debugDescription)][Error] Error sending frame header: \(error)")
-            }
-        }))
-
-        // 2. send the actual message
-        connection.send(content: data, completion: .contentProcessed({ error in
-            if let error = error {
-                print("[\(connection.endpoint.debugDescription)][Error] Error sending frame content: \(error)")
-            }
-        }))
+        // Enqueue into the per-connection serial send queue for backpressure
+        guard let entry = connectionQueues[ObjectIdentifier(connection)] else { return }
+        entry.sendQueue.enqueue(framedData)
     }
 
     private func appendToPendingList(_ package: Serializable) {
@@ -305,16 +359,18 @@ extension NetServiceTransport {
     }
 
     private func disconnectFromEndpoint(_ endpoint: NWEndpoint) {
-        let connectionsToRemove = connections.filter { $0.endpoint == endpoint }
-        connectionsToRemove.forEach { $0.cancel() }
-        connections.removeAll { $0.endpoint == endpoint }
-        if !connectionsToRemove.isEmpty {
-            print("[Atlantis] Disconnected from \(endpoint.debugDescription)")
+        let idsToRemove = connectionQueues.filter { $0.value.connection.endpoint == endpoint }
+        guard !idsToRemove.isEmpty else { return }
+        for (id, entry) in idsToRemove {
+            entry.connection.cancel()
+            connectionQueues.removeValue(forKey: id)
         }
+        print("[Atlantis] Disconnected from \(endpoint.debugDescription)")
     }
 
     private func setupAndStartConnection(_ connection: NWConnection) {
-        connections.append(connection)
+        let sendQueue = ConnectionSendQueue(connection: connection, queue: queue)
+        connectionQueues[ObjectIdentifier(connection)] = (connection, sendQueue)
         setupConnectionStateHandler(connection)
         connection.start(queue: queue)
     }
@@ -332,13 +388,18 @@ extension NetServiceTransport {
                 break
             case .ready:
                 print("[\(endpointDesc)] ✅ Connection established.")
-                // Send initial connection info and flush pending
+                // Reset retry counters on successful connection
                 #if targetEnvironment(simulator)
-                // Reset retry counter on successful simulator connection
                 strongSelf.simulatorRetryCount = 0
+                #else
+                strongSelf.deviceRetryCount = 0
                 #endif
                 strongSelf.sendConnectionPackage(connection: connection)
                 strongSelf.flushAllPendingPackagesIfNeed()
+                // Resume the send queue in case there are buffered messages
+                if let entry = strongSelf.connectionQueues[ObjectIdentifier(connection)] {
+                    entry.sendQueue.resume()
+                }
             case .waiting(let error):
                 #if targetEnvironment(simulator)
                 // For simulator, attempt to retry the connection after a delay
@@ -348,9 +409,7 @@ extension NetServiceTransport {
                 connection.cancel()
 
                 // Remove the connection immediately to allow retry
-                if let index = strongSelf.connections.firstIndex(where: { $0 === connection }) {
-                    strongSelf.connections.remove(at: index)
-                }
+                strongSelf.connectionQueues.removeValue(forKey: ObjectIdentifier(connection))
 
                 // Check retry limit
                 if strongSelf.simulatorRetryCount < strongSelf.maxSimulatorRetries {
@@ -373,15 +432,40 @@ extension NetServiceTransport {
                     print("❌ [Atlantis][Simulator] Maximum retry limit (\(strongSelf.maxSimulatorRetries)) reached. Stopping connection attempts.")
                 }
                 #else
-                print("[\(endpointDesc)] ⚠️ Connection waiting: \(error).")
+                // Real device: cancel stalled connection and attempt browser restart
+                print("[\(endpointDesc)] ⚠️ Connection waiting: \(error). Will attempt reconnection.")
+                connection.cancel()
+                strongSelf.connectionQueues.removeValue(forKey: ObjectIdentifier(connection))
+                if !strongSelf.connections.contains(where: { $0.state == .ready }) {
+                    strongSelf.restartBonjourBrowser()
+                }
                 #endif
             case .failed(let error):
                 print("[\(endpointDesc)] ❌ Connection failed: \(error).")
                 // Remove the failed connection
-                strongSelf.connections.removeAll { $0 === connection }
+                strongSelf.connectionQueues.removeValue(forKey: ObjectIdentifier(connection))
+                #if targetEnvironment(simulator)
+                // Simulator: retry direct connection on failure too
+                if strongSelf.simulatorRetryCount < strongSelf.maxSimulatorRetries {
+                    strongSelf.simulatorRetryCount += 1
+                    let currentRetry = strongSelf.simulatorRetryCount
+                    print("🔄 [Atlantis][Simulator] Retry (\(currentRetry)/\(strongSelf.maxSimulatorRetries)) after failure in 15 seconds...")
+                    strongSelf.queue.asyncAfter(deadline: .now() + 15.0) { [weak self] in
+                        guard let strongSelf = self else { return }
+                        let endpoint = strongSelf.getEndpointForLocalhost()
+                        let newConnection = NWConnection(to: endpoint, using: .tcp)
+                        strongSelf.setupAndStartConnection(newConnection)
+                    }
+                }
+                #else
+                // Real device: restart Bonjour browser to re-discover endpoints
+                if !strongSelf.connections.contains(where: { $0.state == .ready }) {
+                    strongSelf.restartBonjourBrowser()
+                }
+                #endif
             case .cancelled:
                 // Remove the cancelled connection
-                strongSelf.connections.removeAll { $0 === connection }
+                strongSelf.connectionQueues.removeValue(forKey: ObjectIdentifier(connection))
             @unknown default:
                 print("[\(endpointDesc)] Unknown connection state.")
                 break
@@ -460,11 +544,39 @@ extension NetServiceTransport {
         browser?.cancel()
         browser = nil
         // Cancel all active connections before removing them
-        connections.forEach { $0.cancel() }
-        connections.removeAll()
+        for (_, entry) in connectionQueues {
+            entry.connection.cancel()
+        }
+        connectionQueues.removeAll()
         pendingPackages.removeAll()
-        simulatorRetryCount = 0 // Reset retry count on stop
-        print("[Atlantis] Transport stopped and connections cleared.") // Added log for clarity
+        simulatorRetryCount = 0
+        deviceRetryCount = 0
+        print("[Atlantis] Transport stopped and connections cleared.")
+    }
+
+    /// Restarts the Bonjour browser to re-discover endpoints after a connection failure.
+    /// Must be called on `queue`.
+    private func restartBonjourBrowser(afterDelay delay: TimeInterval = 15.0) {
+        guard deviceRetryCount < maxDeviceRetries else {
+            print("❌ [Atlantis] Maximum device reconnection limit (\(maxDeviceRetries)) reached. Stopping reconnection attempts.")
+            return
+        }
+
+        deviceRetryCount += 1
+        let currentRetry = deviceRetryCount
+        let maxRetries = maxDeviceRetries
+
+        print("🔄 [Atlantis] Reconnecting (\(currentRetry)/\(maxRetries)) in \(Int(delay)) seconds...")
+
+        // Cancel existing browser so a fresh one re-discovers all endpoints
+        browser?.cancel()
+        browser = nil
+
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let strongSelf = self else { return }
+            print("[Atlantis] Retry #\(currentRetry): Restarting Bonjour browser...")
+            strongSelf.startBrowsing()
+        }
     }
 }
 
