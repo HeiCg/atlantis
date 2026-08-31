@@ -91,6 +91,19 @@ extension NetServiceTransport: Transporter {
             // Reset all current connections and browser if needed
             strongSelf.stopInternal()
 
+            // Manual direct connection: skip Bonjour entirely and connect
+            // straight to the configured host:port over TCP. This is the
+            // plan-B path for physical devices where Bonjour multicast is
+            // unavailable, and it works on both simulator and device.
+            if let host = config.host {
+                let port = NWEndpoint.Port(rawValue: config.port) ?? Constants.directConnectionPort
+                print("⚡️[Atlantis] Connecting directly to \(host):\(port) over TCP (manual mode, Bonjour disabled)...")
+                let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: port)
+                let connection = NWConnection(to: endpoint, using: .tcp)
+                strongSelf.setupAndStartConnection(connection)
+                return
+            }
+
             #if targetEnvironment(simulator)
             // iOS Simulator: Direct TCP connection
             let endpoint = strongSelf.getEndpointForLocalhost()

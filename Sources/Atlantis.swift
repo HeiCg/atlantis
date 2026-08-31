@@ -92,11 +92,39 @@ public final class Atlantis: NSObject {
     /// - Parameter hostName: Host name of Mac machine. You can find your current Host Name in Proxyman -> Certificate -> Install on iOS -> By Atlantis -> Show Start Atlantis
     /// - Parameter shouldCaptureWebSocketTraffic: Determine if Atlantis should perform the Method Swizzling on WS/WSS connection. Default is true.
     @objc public class func start(hostName: String? = nil, shouldCaptureWebSocketTraffic: Bool = true) {
-        // save config
+        // Bonjour discovery path: needs the Info.plist keys, so run the safety check.
         let configuration = Configuration.default(hostName: hostName)
+        startInternal(configuration: configuration,
+                      requiresBonjourService: true,
+                      shouldCaptureWebSocketTraffic: shouldCaptureWebSocketTraffic)
+    }
 
+    /// Start Atlantis with a manual, direct TCP connection to Proxyman (or a compatible collector),
+    /// bypassing Bonjour discovery entirely.
+    ///
+    /// Useful on physical devices where the local network doesn't allow Bonjour multicast, or when
+    /// you already know the host address. Because it doesn't use Bonjour, the `NSBonjourServices`
+    /// Info.plist entry is not required for this path.
+    /// - Parameter host: IP address or hostname of the machine running Proxyman / the collector.
+    /// - Parameter port: TCP port to connect to. Defaults to Proxyman's `10909`.
+    /// - Parameter passcode: Optional shared secret sent at the root of the connection handshake.
+    ///   The official Proxyman app ignores it; a hardened collector can require it.
+    /// - Parameter shouldCaptureWebSocketTraffic: Determine if Atlantis should perform the Method Swizzling on WS/WSS connection. Default is true.
+    public class func start(host: String,
+                            port: UInt16 = 10909,
+                            passcode: String? = nil,
+                            shouldCaptureWebSocketTraffic: Bool = true) {
+        let configuration = Configuration.manual(host: host, port: port, passcode: passcode)
+        startInternal(configuration: configuration,
+                      requiresBonjourService: false,
+                      shouldCaptureWebSocketTraffic: shouldCaptureWebSocketTraffic)
+    }
+
+    private class func startInternal(configuration: Configuration,
+                                     requiresBonjourService: Bool,
+                                     shouldCaptureWebSocketTraffic: Bool) {
         //
-        if Atlantis.shared.isEnabledTransportLayer {
+        if Atlantis.shared.isEnabledTransportLayer && requiresBonjourService {
 
             // Check if Bonjour and required info's key are available
             Atlantis.shared.safetyCheck()
@@ -107,7 +135,7 @@ public final class Atlantis: NSObject {
             }
         }
 
-        // 
+        //
         guard !isEnabled.value else { return }
         isEnabled.mutate { $0 = true }
 
