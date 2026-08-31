@@ -107,7 +107,7 @@ extension NetServiceTransport: Transporter {
             #if targetEnvironment(simulator)
             // iOS Simulator: Direct TCP connection
             let endpoint = strongSelf.getEndpointForLocalhost()
-            
+
             // Reset retry count before starting
             strongSelf.simulatorRetryCount = 0
             print("⚡️[Atlantis][Simulator] Attempting direct connection to Proxyman app on your Mac... without using Bonjour service (due to macOS 15.4+ issue)")

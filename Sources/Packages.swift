@@ -158,7 +158,7 @@ public final class TrafficPackage: Codable, CustomDebugStringConvertible, Serial
         // Construct the Response without body
         self.response = Response(response)
     }
-    
+
     func updateDidComplete(_ error: Error?) {
         endAt = Date().timeIntervalSince1970
         if let error = error {
@@ -331,7 +331,7 @@ public final class Request: Codable {
         url = urlRequest.url?.absoluteString ?? "-"
         method = urlRequest.httpMethod ?? "-"
         headers = urlRequest.allHTTPHeaderFields?.map { Header(key: $0.key, value: $0.value ) } ?? []
-        
+
         // Try to get body from httpBody first
         if let httpBody = urlRequest.httpBody {
             body = httpBody
@@ -353,20 +353,20 @@ public final class Request: Codable {
     func resetBody() {
         self.body = nil
     }
-    
+
     // MARK: - Helper Methods
-    
+
     /// Safely reads data from an InputStream
     /// This method attempts to read data from the stream without affecting the original request
     private static func readDataFromStream(_ stream: InputStream) -> Data? {
         // Check if the stream is already open
         let wasStreamOpen = stream.streamStatus != .notOpen
-        
+
         // If the stream is not open, try to open it
         if !wasStreamOpen {
             stream.open()
         }
-        
+
         // Check if we can read from the stream
         guard stream.hasBytesAvailable || stream.streamStatus == .atEnd else {
             if !wasStreamOpen {
@@ -374,7 +374,7 @@ public final class Request: Codable {
             }
             return nil
         }
-        
+
         var data = Data()
         let bufferSize = 8192  // 8KB chunks for better performance with larger bodies
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
@@ -385,7 +385,7 @@ public final class Request: Codable {
                 stream.close()
             }
         }
-        
+
         while stream.hasBytesAvailable {
             let bytesRead = stream.read(buffer, maxLength: bufferSize)
             if bytesRead < 0 {
@@ -399,7 +399,7 @@ public final class Request: Codable {
                 data.append(buffer, count: bytesRead)
             }
         }
-        
+
         return data.isEmpty ? nil : data
     }
 }

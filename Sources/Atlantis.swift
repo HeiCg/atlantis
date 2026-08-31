@@ -69,7 +69,7 @@ public final class Atlantis: NSObject {
     private var isRunningOniOSPlayground = false
 
     private var taskStartTimes: [String: TimeInterval] = [:]
-    
+
     // MARK: - Init
 
     private override init() {
@@ -77,7 +77,7 @@ public final class Atlantis: NSObject {
         super.init()
         injector.delegate = self
     }
-    
+
     // MARK: - Public
 
     /// Build version of Atlantis
@@ -172,7 +172,7 @@ public final class Atlantis: NSObject {
     public class func setDelegate(_ delegate: AtlantisDelegate) {
         Atlantis.shared.delegate = delegate
     }
-    
+
     /// Set list of URLProtocol classes that cause the duplicate records
     public class func setIgnoreProtocols(_ protocols: [AnyClass]) {
         Atlantis.shared.ignoreProtocols = protocols
@@ -251,24 +251,24 @@ extension Atlantis {
         }
         #endif
     }
-    
+
     private func checkShouldIgnoreByURLProtocol(protocols: [AnyClass], on request: URLRequest) -> Bool {
         // Get the BBHTTPProtocolHandler class by name
         for cls in protocols {
-            
+
             // Get the canInitWithRequest: selector
             let selector = NSSelectorFromString("canInitWithRequest:")
-            
+
             // Ensure the class responds to the selector
             guard let method = class_getClassMethod(cls, selector) else {
                 print("[Atlantis] ❓ Warn: canInitWithRequest: method not found.")
                 return false
             }
-            
+
             // Cast the method implementation to the correct function signature
             typealias CanInitWithRequestFunction = @convention(c) (AnyClass, Selector, URLRequest) -> Bool
             let canInitWithRequest = unsafeBitCast(method_getImplementation(method), to: CanInitWithRequestFunction.self)
-            
+
             // Call the method with the request
             if canInitWithRequest(cls, selector, request) {
                 return true
@@ -303,7 +303,7 @@ extension Atlantis {
                 print("[Atlantis] ❌ Error: Should build package from URLSessionTask")
                 return nil
             }
-            
+
             // Just check ignore protocols if it's not empty and the session resumes the task has this protocol
             var sessionProtocols: [AnyClass] = []
             if !ignoreProtocols.isEmpty, let session = task.value(forKey: "session") as? URLSession {
@@ -311,13 +311,13 @@ extension Atlantis {
                 let shouldIgnores = Set(ignoreProtocols.map { NSStringFromClass($0) })
                 sessionProtocols = protocols.intersection(shouldIgnores).compactMap { NSClassFromString($0) }
             }
-            
+
             // check should ignore this request because it's duplicated by URLProtocol classes
             if checkShouldIgnoreByURLProtocol(protocols: sessionProtocols, on: request) {
                 ignoredRequestIds.insert(id)
                 return nil
             }
-            
+
             packages[id] = package
             return package
         default:
