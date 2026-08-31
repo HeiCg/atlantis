@@ -30,7 +30,7 @@ public final class Atlantis: NSObject {
     private var packages: [String: TrafficPackage] = [:]
     private lazy var waitingWebsocketPackages: [String: [TrafficPackage]] = [:]
     private var sentServerSentEventTrafficIds: Set<String> = []
-    private var serverSentEventBuffers: [String: String] = [:]
+    private var serverSentEventParsers: [String: SSEParser] = [:]
     private var ignoreProtocols: [AnyClass] = []
     private let queue = DispatchQueue(label: "com.proxyman.atlantis")
     private var ignoredRequestIds: Set<String> = []
@@ -120,6 +120,33 @@ public final class Atlantis: NSObject {
                       shouldCaptureWebSocketTraffic: shouldCaptureWebSocketTraffic)
     }
 
+    /// Start Atlantis against a hardened NetCapture collector over pinned TLS (v2).
+    ///
+    /// The device trusts only `tls.certificateDER` as its anchor, sends
+    /// `passcode` (the collector's device token) at the root of the ConnectionPackage,
+    /// and waits for the server's `ready` control frame before replaying. `limits`
+    /// bounds captured memory; `excludedEndpoints` keeps the collector's own ingest
+    /// out of the capture. Requiring `tls` keeps this overload unambiguous from the
+    /// legacy plaintext `start(host:port:passcode:)` above.
+    /// - Parameter passcode: the collector device token, verified by the server.
+    public class func start(host: String,
+                            port: UInt16 = 10909,
+                            passcode: String?,
+                            tls: CollectorTLS,
+                            limits: CaptureLimits = .qa,
+                            excludedEndpoints: [CaptureEndpoint] = [],
+                            shouldCaptureWebSocketTraffic: Bool = true) {
+        let configuration = Configuration.manual(host: host,
+                                                 port: port,
+                                                 passcode: passcode,
+                                                 tls: tls,
+                                                 limits: limits,
+                                                 excludedEndpoints: excludedEndpoints)
+        startInternal(configuration: configuration,
+                      requiresBonjourService: false,
+                      shouldCaptureWebSocketTraffic: shouldCaptureWebSocketTraffic)
+    }
+
     private class func startInternal(configuration: Configuration,
                                      requiresBonjourService: Bool,
                                      shouldCaptureWebSocketTraffic: Bool) {
@@ -156,6 +183,8 @@ public final class Atlantis: NSObject {
         if Atlantis.shared.isEnabledTransportLayer {
             Atlantis.shared.transporter.stop()
         }
+        // O09: release every capture structure so a stopped Atlantis retains nothing.
+        Atlantis.shared.clearCaptureState()
     }
 
     /// Enable Transport Layer (e.g. Bonjour)
@@ -318,6 +347,16 @@ extension Atlantis {
                 return nil
             }
 
+            // Exclude the collector's own endpoints before we retain anything, so
+            // Atlantis never captures its own uploads.
+            if isExcludedEndpoint(request.url) {
+                ignoredRequestIds.insert(id)
+                return nil
+            }
+
+            // Apply the configured per-body retention cap (nil keeps legacy behaviour).
+            package.captureMaxBodyBytes = configuration.limits?.maxBodyBytes
+
             packages[id] = package
             return package
         default:
@@ -325,6 +364,49 @@ extension Atlantis {
         }
         return nil
     }
+
+    /// Whether a URL targets one of the configured excluded endpoints (host + port).
+    private func isExcludedEndpoint(_ url: URL?) -> Bool {
+        guard let url = url,
+              let host = url.host,
+              !configuration.excludedEndpoints.isEmpty else { return false }
+        let port = url.port ?? Atlantis.defaultPort(forScheme: url.scheme)
+        return configuration.excludedEndpoints.contains { $0.host == host && Int($0.port) == port }
+    }
+
+    private static func defaultPort(forScheme scheme: String?) -> Int {
+        switch scheme?.lowercased() {
+        case "https", "wss": return 443
+        case "http", "ws": return 80
+        default: return -1
+        }
+    }
+
+    /// O09: release every capture structure. Called on stop() and reconfigure so a
+    /// stopped/reconfigured Atlantis retains no packages, timestamps, SSE state or
+    /// pending websocket buffers, invalidating any lingering callbacks by clearing
+    /// the maps they key into.
+    func clearCaptureState() {
+        queue.sync {
+            packages.removeAll()
+            waitingWebsocketPackages.removeAll()
+            sentServerSentEventTrafficIds.removeAll()
+            serverSentEventParsers.removeAll()
+            taskStartTimes.removeAll()
+            ignoredRequestIds.removeAll()
+        }
+    }
+
+    #if DEBUG
+    /// Test hook: total count of entries across every capture structure. Zero means a
+    /// fully released state.
+    var test_captureStateCount: Int {
+        return queue.sync {
+            packages.count + waitingWebsocketPackages.count + sentServerSentEventTrafficIds.count
+                + serverSentEventParsers.count + taskStartTimes.count + ignoredRequestIds.count
+        }
+    }
+    #endif
 }
 
 // MARK: - Injection Methods
@@ -336,6 +418,9 @@ extension Atlantis: InjectorDelegate {
         // If we use async, sometime the httpbody is released -> Atlantis could get the Request's body
         // It's safe to use sync here because URL has their own background queue
         queue.sync {
+            // O09: gate before registering any bookkeeping. A resume after stop must
+            // record nothing, so a stopped Atlantis cannot accumulate taskStartTimes.
+            guard Atlantis.isEnabled.value else { return }
             // store the start time, but don't create a Request here
             // because the request might not be available yet, or missing some data
             // https://github.com/ProxymanApp/atlantis/issues/177
@@ -475,7 +560,18 @@ extension Atlantis {
 
     private func handleDidFinish(_ taskOrConnection: AnyObject, error: Error?) {
         queue.sync {
-            guard Atlantis.isEnabled.value else { return }
+            // O09: if capture was disabled mid-flight, still finish our own bookkeeping
+            // cleanup for this task (without ever cancelling the app's task) so no
+            // capture structure leaks a completed request.
+            guard Atlantis.isEnabled.value else {
+                let id = PackageIdentifier.getID(taskOrConnection: taskOrConnection)
+                packages.removeValue(forKey: id)
+                taskStartTimes.removeValue(forKey: id)
+                sentServerSentEventTrafficIds.remove(id)
+                serverSentEventParsers.removeValue(forKey: id)
+                ignoredRequestIds.remove(id)
+                return
+            }
             guard let package = getPackage(taskOrConnection, isCompleted: true) else {
                 return
             }
@@ -575,7 +671,7 @@ extension Atlantis {
         packages.removeValue(forKey: package.id)
         taskStartTimes.removeValue(forKey: taskId)
         sentServerSentEventTrafficIds.remove(package.id)
-        serverSentEventBuffers.removeValue(forKey: package.id)
+        serverSentEventParsers.removeValue(forKey: package.id)
     }
 }
 
@@ -595,9 +691,19 @@ extension Atlantis {
     private func sendServerSentEventMessages(package: TrafficPackage, data: Data) {
         startSendingServerSentEventTrafficIfNeeded(package)
 
-        for eventText in parseServerSentEventBlocks(packageId: package.id, data: data) {
+        let parser = serverSentEventParser(for: package.id)
+        for eventText in parser.parse(data) {
             sendServerSentEventMessage(package: package, eventText: eventText)
         }
+    }
+
+    private func serverSentEventParser(for id: String) -> SSEParser {
+        if let existing = serverSentEventParsers[id] { return existing }
+        // Bound each SSE event by the configured body cap so a runaway stream cannot
+        // grow unbounded; nil keeps the parser effectively unlimited (legacy).
+        let parser = SSEParser(maxEventBytes: configuration.limits?.maxBodyBytes ?? Int.max)
+        serverSentEventParsers[id] = parser
+        return parser
     }
 
     private func sendServerSentEventMessage(package: TrafficPackage, eventText: String) {
@@ -619,9 +725,12 @@ extension Atlantis {
             return
         }
 
-        if let pendingEvent = serverSentEventBuffers[package.id]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !pendingEvent.isEmpty {
-            sendServerSentEventMessage(package: package, eventText: pendingEvent)
+        // Flush any trailing block the parser holds (an event that lacked a final
+        // blank line). A limit-omitted/truncated suffix is never emitted.
+        if let parser = serverSentEventParsers[package.id] {
+            for eventText in parser.finish() {
+                sendServerSentEventMessage(package: package, eventText: eventText)
+            }
         }
 
         let reason = error?.localizedDescription.data(using: .utf8)
@@ -632,30 +741,6 @@ extension Atlantis {
         startSendingWebsocketMessage(package)
     }
 
-    private func parseServerSentEventBlocks(packageId: String, data: Data) -> [String] {
-        let chunk = String(decoding: data, as: UTF8.self)
-        var buffer = (serverSentEventBuffers[packageId] ?? "") + chunk
-        var events: [String] = []
-
-        while let delimiterRange = firstServerSentEventDelimiterRange(in: buffer) {
-            let eventText = String(buffer[..<delimiterRange.lowerBound])
-            buffer.removeSubrange(buffer.startIndex..<delimiterRange.upperBound)
-
-            if !eventText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                events.append(eventText)
-            }
-        }
-
-        serverSentEventBuffers[packageId] = buffer
-        return events
-    }
-
-    private func firstServerSentEventDelimiterRange(in text: String) -> Range<String.Index>? {
-        let delimiters = ["\r\n\r\n", "\n\n", "\r\r"]
-        return delimiters
-            .compactMap { text.range(of: $0) }
-            .min { $0.lowerBound < $1.lowerBound }
-    }
 }
 
 // MARK: - Helper
