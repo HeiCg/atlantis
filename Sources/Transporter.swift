@@ -674,19 +674,23 @@ final class ManualTransportCore {
         frameReader.reset()
         let channel = factory.makeConnection(host: host, port: config.port, tls: config.tls)
         current = channel
+        // Capture this attempt's generation. Every callback below is fenced by it, so
+        // a callback from a superseded attempt (a second disconnect for the same
+        // socket, or a late read after teardown) is dropped instead of acting on the
+        // freshly-installed connection.
         let g = generation
         channel.stateHandler = { [weak self] state in
             guard let self, self.isStarted, self.generation == g else { return }
-            self.handleState(state, channel: channel, generation: g)
+            self.handleState(state, channel: channel)
         }
         channel.startReceiving { [weak self] data, error in
             guard let self, self.isStarted, self.generation == g else { return }
-            self.handleInbound(data: data, error: error, generation: g)
+            self.handleInbound(data: data, error: error)
         }
         channel.start()
     }
 
-    private func handleState(_ state: ChannelState, channel: ConnectionChannel, generation g: Int) {
+    private func handleState(_ state: ChannelState, channel: ConnectionChannel) {
         switch state {
         case .ready:
             retry.resetBackoff()
@@ -696,8 +700,15 @@ final class ManualTransportCore {
             if config?.tls == nil {
                 markReadyAndFlush()
             }
-        case .failed:
-            scheduleReconnect(generation: g)
+        case .failed(let error):
+            // A pinned-TLS verify-block rejection surfaces as NWError.tls — a permanent
+            // pin/cert failure, not a transient network drop. Enter `blocked` (like an
+            // auth_error) so a wrong pin does not retry forever.
+            if Self.isCertificateFailure(error) {
+                enterBlocked()
+            } else {
+                handleDisconnect()
+            }
         case .waiting:
             // NWConnection keeps retrying a waiting connection on its own; nothing to do.
             break
@@ -706,10 +717,10 @@ final class ManualTransportCore {
         }
     }
 
-    private func handleInbound(data: Data?, error: Error?, generation g: Int) {
+    private func handleInbound(data: Data?, error: Error?) {
         guard let data = data, error == nil else {
             // EOF or read error enters the same reconnect path as a send failure.
-            scheduleReconnect(generation: g)
+            handleDisconnect()
             return
         }
         frameReader.append(data)
@@ -720,21 +731,42 @@ final class ManualTransportCore {
                 markReadyAndFlush()
             case .authError:
                 // Authentication rejected: blocked, no reconnect.
-                blocked = true
-                retry.cancelPending()
-                teardownConnection()
+                enterBlocked()
             }
         }
     }
 
-    private func scheduleReconnect(generation g: Int) {
-        guard isStarted, !blocked, generation == g else { return }
+    /// Terminal failure (auth rejected or certificate/pin invalid): stop, do not retry.
+    private func enterBlocked() {
+        blocked = true
+        generation += 1
+        retry.cancelPending()
+        teardownConnection()
+        readyForReplay = false
+    }
+
+    /// A transient disconnect. Bumping the generation here invalidates the just-failed
+    /// attempt's remaining callbacks, so the state-update and the read-EOF that both
+    /// fire for a single disconnect cannot each schedule a retry (which would double
+    /// the backoff), and a stale post-teardown read cannot tear down the next attempt.
+    private func handleDisconnect() {
+        guard isStarted, !blocked else { return }
+        generation += 1
+        let g = generation
         teardownConnection()
         readyForReplay = false
         retry.scheduleRetry { [weak self] in
             guard let self, self.isStarted, !self.blocked, self.generation == g else { return }
             self.connect()
         }
+    }
+
+    /// Whether a connection failure is a TLS/certificate error (permanent) rather than
+    /// a transient network error.
+    static func isCertificateFailure(_ error: Error?) -> Bool {
+        guard let nwError = error as? NWError else { return false }
+        if case .tls = nwError { return true }
+        return false
     }
 
     // MARK: Sending
@@ -762,7 +794,7 @@ final class ManualTransportCore {
         channel.send(header, isComplete: false) { _ in }
         channel.send(payload, isComplete: true) { [weak self] error in
             guard let self, self.isStarted, self.generation == g else { return }
-            if error != nil { self.scheduleReconnect(generation: g) }
+            if error != nil { self.handleDisconnect() }
         }
     }
 
@@ -791,6 +823,7 @@ final class ManualTransportCore {
     var test_pendingCount: Int { pending.count }
     var test_pendingBytes: Int { pendingBytes }
     var test_generation: Int { generation }
+    var test_retryAttempt: Int { retry.attempt }
     #endif
 }
 
@@ -815,6 +848,8 @@ final class NWConnectionChannel: ConnectionChannel {
     private let connection: NWConnection
     private let queue: DispatchQueue
     var stateHandler: ((ChannelState) -> Void)?
+    private var inboundHandler: ((Data?, Error?) -> Void)?
+    private var isCancelled = false
 
     init(connection: NWConnection, queue: DispatchQueue) {
         self.connection = connection
@@ -835,7 +870,11 @@ final class NWConnectionChannel: ConnectionChannel {
     }
 
     func cancel() {
+        isCancelled = true
+        // Drop BOTH handlers so no state-update or in-flight read callback can fire
+        // after cancel and act on behalf of a superseded connection.
         connection.stateUpdateHandler = nil
+        inboundHandler = nil
         connection.cancel()
     }
 
@@ -846,15 +885,18 @@ final class NWConnectionChannel: ConnectionChannel {
     }
 
     func startReceiving(_ handler: @escaping (Data?, Error?) -> Void) {
-        receiveLoop(handler)
+        inboundHandler = handler
+        receiveLoop()
     }
 
-    private func receiveLoop(_ handler: @escaping (Data?, Error?) -> Void) {
+    private func receiveLoop() {
+        guard !isCancelled else { return }
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self, !self.isCancelled, let handler = self.inboundHandler else { return }
             if let data = data, !data.isEmpty { handler(data, nil) }
             if let error = error { handler(nil, error); return }
             if isComplete { handler(nil, nil); return }
-            self?.receiveLoop(handler)
+            self.receiveLoop()
         }
     }
 }

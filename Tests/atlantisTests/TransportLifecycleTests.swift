@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import Network
 @testable import Atlantis
 
 // MARK: - Fakes
@@ -69,8 +70,11 @@ private final class FakeChannel: ConnectionChannel {
     // Test drivers
     func becomeReady() { stateHandler?(.ready) }
     func fail() { stateHandler?(.failed(NSError(domain: "test", code: 1))) }
+    /// Simulate a pinned-TLS verify-block rejection (NWError.tls).
+    func failTLS() { stateHandler?(.failed(NWError.tls(-9808))) }
     func deliverInbound(_ data: Data) { inboundHandler?(data, nil) }
     func deliverEOF() { inboundHandler?(nil, nil) }
+    var hasStateHandler: Bool { stateHandler != nil }
 }
 
 private final class FakeConnections: ConnectionFactory {
@@ -229,6 +233,75 @@ final class TransportLifecycleTests: XCTestCase {
         // A subsequent EOF/failure must NOT schedule a reconnect while blocked.
         clock.advance(by: 300)
         XCTAssertEqual(connections.createdCount, 1)
+    }
+
+    // MARK: - Certificate/pin failure -> blocked (finding 1)
+
+    func testCertificateFailureBlocksReconnect() {
+        let clock = FakeClock()
+        let connections = FakeConnections()
+        let transport = makeCore(clock, connections)
+        let tls = CollectorTLS(certificateDER: Data([0x30]), certificateSha256: String(repeating: "a", count: 64))
+        transport.start(Configuration.manual(host: "h", port: 1, tls: tls))
+
+        // A pinned-TLS verify-block rejection (NWError.tls) is permanent: block, never
+        // retry a wrong pin.
+        connections.current!.failTLS()
+        XCTAssertTrue(transport.test_isBlocked)
+        clock.advance(by: 300)
+        XCTAssertEqual(connections.createdCount, 1, "a bad pin must not reconnect")
+    }
+
+    func testTransientFailureStillReconnects() {
+        // Contrast: a non-TLS failure is transient and DOES retry.
+        let clock = FakeClock()
+        let connections = FakeConnections()
+        let transport = makeCore(clock, connections)
+        transport.start(Configuration.manual(host: "h", port: 1))
+        connections.current!.fail()
+        XCTAssertFalse(transport.test_isBlocked)
+        clock.advance(by: 5)
+        XCTAssertEqual(connections.createdCount, 2)
+    }
+
+    // MARK: - Stale callbacks from a superseded attempt (finding 2)
+
+    func testSingleDisconnectSchedulesOneRetryNoDoubleBackoff() {
+        let clock = FakeClock()
+        let connections = FakeConnections()
+        let transport = makeCore(clock, connections)
+        transport.start(Configuration.manual(host: "h", port: 1))
+        let channelA = connections.current!
+
+        // For one disconnect, both a state .failed and a read EOF can fire. Only the
+        // first must schedule a retry; the second (stale) must be ignored so backoff
+        // is not double-incremented.
+        channelA.fail()
+        channelA.deliverEOF()
+        XCTAssertEqual(transport.test_retryAttempt, 1, "one disconnect => one backoff step")
+        XCTAssertLessThanOrEqual(clock.pendingCount, 1, "at most one pending timer")
+    }
+
+    func testStaleReadAfterReconnectDoesNotTearDownNextConnection() {
+        let clock = FakeClock()
+        let connections = FakeConnections()
+        let transport = makeCore(clock, connections)
+        transport.start(Configuration.manual(host: "h", port: 1))
+        let channelA = connections.current!
+
+        channelA.fail()          // schedule retry for attempt A
+        clock.advance(by: 5)     // fire it -> channel B connects
+        let channelB = connections.current!
+        XCTAssertEqual(connections.createdCount, 2)
+        let attemptAfter = transport.test_retryAttempt
+
+        // channelA's fake keeps its inbound handler live post-teardown. A stale read or
+        // EOF from it must be fenced by generation and must NOT reconnect or disturb B.
+        channelA.deliverEOF()
+        channelA.deliverInbound(Data("stale-garbage".utf8))
+        XCTAssertEqual(connections.createdCount, 2, "stale callback must not open a new connection")
+        XCTAssertEqual(transport.test_retryAttempt, attemptAfter, "stale callback must not bump backoff")
+        XCTAssertTrue(channelB === connections.current, "channel B must remain current")
     }
 
     // MARK: - Offline queue budget
