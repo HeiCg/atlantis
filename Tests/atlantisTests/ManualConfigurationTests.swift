@@ -6,6 +6,7 @@ import XCTest
 /// the collector cares about. `passcode` lives at the root, matching the Android fork.
 private struct DecodedConnectionPackage: Decodable {
     let passcode: String?
+    let appVersion: String?
     let device: DecodedDevice
     let project: DecodedProject
 }
@@ -48,6 +49,24 @@ final class ConnectionPackagePasscodeTests: XCTestCase {
 
         let decoded = try JSONDecoder().decode(DecodedConnectionPackage.self, from: data)
         XCTAssertEqual(decoded.passcode, "s3cr3t")
+    }
+
+    func testConnectionPackageAppVersionMatchesBundleAtRoot() throws {
+        let config = Configuration.default()
+        let package = ConnectionPackage(config: config)
+
+        let data = try XCTUnwrap(package.toData())
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        // appVersion mirrors CFBundleShortVersionString: present at the root when
+        // the bundle exposes it, omitted otherwise. Don't assume a value, since the
+        // test runner's Info.plist may not carry one.
+        let bundleVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        if let bundleVersion = bundleVersion {
+            XCTAssertEqual(json["appVersion"] as? String, bundleVersion)
+        } else {
+            XCTAssertFalse(json.keys.contains("appVersion"), "appVersion key must be omitted when the bundle has no version")
+        }
     }
 
     func testDefaultConfigurationCarriesPasscodeWhenProvided() {

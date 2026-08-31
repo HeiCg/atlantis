@@ -32,6 +32,10 @@ struct ConnectionPackage: Codable, Serializable {
     // The Android fork uses the same name and location.
     let passcode: String?
 
+    // Optional app marketing version (CFBundleShortVersionString) at the root.
+    // Additive: omitted when unavailable; the collector uses it when present.
+    let appVersion: String?
+
     init(config: Configuration) {
         var currentDevice = Device.current
         currentDevice.name = config.deviceName
@@ -41,6 +45,7 @@ struct ConnectionPackage: Codable, Serializable {
         self.project = currentProject
         self.icon = Image.appIcon?.getPNGData()
         self.passcode = config.passcode
+        self.appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     }
 
     func toData() -> Data? {
