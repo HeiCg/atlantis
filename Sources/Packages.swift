@@ -26,6 +26,12 @@ struct ConnectionPackage: Codable, Serializable {
     let project: Project
     let icon: Data?
 
+    // Optional shared secret at the root of the handshake JSON.
+    // Additive and opt-in: when nil the key is omitted, so the official
+    // Proxyman app (and any older receiver) stays fully compatible.
+    // The Android fork uses the same name and location.
+    let passcode: String?
+
     init(config: Configuration) {
         var currentDevice = Device.current
         currentDevice.name = config.deviceName
@@ -34,6 +40,7 @@ struct ConnectionPackage: Codable, Serializable {
         self.device = currentDevice
         self.project = currentProject
         self.icon = Image.appIcon?.getPNGData()
+        self.passcode = config.passcode
     }
 
     func toData() -> Data? {
