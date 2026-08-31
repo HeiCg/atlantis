@@ -65,6 +65,14 @@ final class NetServiceTransport: NSObject {
     private var simulatorRetryCount = 0
     private let maxSimulatorRetries = 5
 
+    // Manual/TLS direct connection core (host != nil). Owns its own reconnect,
+    // ready-gate and offline queue; the Bonjour/simulator paths above are untouched.
+    private lazy var manualCore = ManualTransportCore(
+        factory: NWConnectionFactory(queue: queue),
+        retry: RetryController(clock: QueueClock(queue: queue)),
+        limits: .qa)
+    private var isManualMode = false
+
     // MARK: - Init
 
     override init() {
@@ -92,17 +100,18 @@ extension NetServiceTransport: Transporter {
             strongSelf.stopInternal()
 
             // Manual direct connection: skip Bonjour entirely and connect
-            // straight to the configured host:port over TCP. This is the
-            // plan-B path for physical devices where Bonjour multicast is
-            // unavailable, and it works on both simulator and device.
+            // straight to the configured host:port (plain TCP, or pinned TLS in
+            // collector v2). Delegated to ManualTransportCore, which owns reconnect,
+            // the v2 ready-gate and the offline queue. It never falls back to
+            // localhost — the simulator path below is the only localhost user.
             if let host = config.host {
-                let port = NWEndpoint.Port(rawValue: config.port) ?? Constants.directConnectionPort
-                print("⚡️[Atlantis] Connecting directly to \(host):\(port) over TCP (manual mode, Bonjour disabled)...")
-                let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: port)
-                let connection = NWConnection(to: endpoint, using: .tcp)
-                strongSelf.setupAndStartConnection(connection)
+                let mode = config.tls == nil ? "TCP" : "pinned TLS"
+                print("⚡️[Atlantis] Connecting directly to \(host):\(config.port) over \(mode) (manual mode, Bonjour disabled)...")
+                strongSelf.isManualMode = true
+                strongSelf.manualCore.start(config)
                 return
             }
+            strongSelf.isManualMode = false
 
             #if targetEnvironment(simulator)
             // iOS Simulator: Direct TCP connection
@@ -136,6 +145,14 @@ extension NetServiceTransport: Transporter {
     func send(package: Serializable) {
         queue.async {[weak self] in
             guard let strongSelf = self else { return }
+
+            // Manual/TLS mode owns its own queue, ready-gate and framing.
+            if strongSelf.isManualMode {
+                if let compressed = package.toCompressedData() {
+                    strongSelf.manualCore.send(payload: compressed)
+                }
+                return
+            }
 
             // Ensure we have at least one ready connection
             guard strongSelf.connections.contains(where: { $0.state == .ready }) else {
@@ -470,6 +487,11 @@ extension NetServiceTransport {
 
     // Internal stop method to be called on the queue
     private func stopInternal() {
+        // Manual/TLS core: release its connection, retry timer and offline queue.
+        if isManualMode {
+            manualCore.stop()
+            isManualMode = false
+        }
         browser?.cancel()
         browser = nil
         // Cancel all active connections before removing them
@@ -504,6 +526,336 @@ extension NetServiceTransport {
         let host = NWEndpoint.Host("localhost") // Simulators connect to localhost
         let endpoint = NWEndpoint.hostPort(host: host, port: port)
         return endpoint
+    }
+}
+
+// MARK: - Manual/TLS transport core (injectable, testable)
+
+/// The lifecycle states the core reacts to, abstracted away from `NWConnection` so the
+/// reconnect/generation logic can be driven by a fake connection in tests.
+enum ChannelState {
+    case ready
+    case waiting(Error?)
+    case failed(Error?)
+    case cancelled
+}
+
+/// A single connection to the collector. Production wraps `NWConnection` (plain TCP or
+/// pinned TLS); tests provide a fake that records endpoints and simulates failures.
+protocol ConnectionChannel: AnyObject {
+    var stateHandler: ((ChannelState) -> Void)? { get set }
+    func start()
+    func cancel()
+    func send(_ data: Data, isComplete: Bool, completion: @escaping (Error?) -> Void)
+    /// Begin delivering inbound framed bytes. `nil` data (or a non-nil error) signals
+    /// EOF/read failure.
+    func startReceiving(_ handler: @escaping (Data?, Error?) -> Void)
+}
+
+/// Creates connections for a host/port, optionally over pinned TLS.
+protocol ConnectionFactory {
+    func makeConnection(host: String, port: UInt16, tls: CollectorTLS?) -> ConnectionChannel
+}
+
+/// Incremental reader for the `[uint64 LE length][payload]` framing. Used only to read
+/// the small server control frames; oversize lengths are dropped defensively.
+struct FrameReader {
+    private var buffer: [UInt8] = []
+    private let maxFrame: Int
+
+    init(maxFrame: Int = 8 * 1024 * 1024) { self.maxFrame = maxFrame }
+
+    mutating func reset() { buffer.removeAll(keepingCapacity: false) }
+    mutating func append(_ data: Data) { buffer.append(contentsOf: data) }
+
+    mutating func nextFrame() -> Data? {
+        guard buffer.count >= 8 else { return nil }
+        var len: UInt64 = 0
+        for i in 0..<8 { len |= UInt64(buffer[i]) << UInt64(8 * i) }
+        if len > UInt64(maxFrame) { reset(); return nil }
+        let total = 8 + Int(len)
+        guard buffer.count >= total else { return nil }
+        let frame = Data(buffer[8..<total])
+        buffer.removeFirst(total)
+        return frame
+    }
+}
+
+/// The collector's v2 control frame, sent before replay. Exclusive to authenticated
+/// TLS v2; the legacy Proxyman path never emits it.
+enum ControlFrame {
+    case ready
+    case authError
+
+    static func parse(_ frame: Data) -> ControlFrame? {
+        let raw = frame.isGzipped ? (frame.gunzip() ?? frame) : frame
+        guard let env = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any],
+              (env["messageType"] as? String) == "control",
+              let contentB64 = env["content"] as? String,
+              let contentData = Data(base64Encoded: contentB64),
+              let inner = (try? JSONSerialization.jsonObject(with: contentData)) as? [String: Any],
+              let type = inner["type"] as? String else { return nil }
+        switch type {
+        case "ready": return .ready
+        case "auth_error": return .authError
+        default: return nil
+        }
+    }
+}
+
+/// Owns the manual/TLS connection lifecycle: connect, send the ConnectionPackage,
+/// gate replay on the v2 `ready` control frame, reconnect with generation-guarded
+/// backoff, bound the offline queue, and release everything on stop. It holds no
+/// direct sockets — connections come from an injected factory and timers from an
+/// injected clock — so `TransportLifecycleTests` drives it with fakes.
+final class ManualTransportCore {
+
+    private let factory: ConnectionFactory
+    private let retry: RetryController
+    private let limits: CaptureLimits
+
+    private var isStarted = false
+    private var blocked = false            // auth/cert failure: do not reconnect
+    private var generation = 0             // monotonic; every callback carries its own
+    private var current: ConnectionChannel?
+    private var config: Configuration?
+    private var readyForReplay = false
+    private var frameReader = FrameReader()
+
+    // Offline queue of already-serialized+compressed payloads (no length prefix yet).
+    private var pending: [Data] = []
+    private var pendingBytes = 0
+
+    init(factory: ConnectionFactory, retry: RetryController, limits: CaptureLimits = .qa) {
+        self.factory = factory
+        self.retry = retry
+        self.limits = limits
+    }
+
+    // MARK: Public API (must be called on the owning serial queue)
+
+    func start(_ config: Configuration) {
+        isStarted = true
+        blocked = false
+        self.config = config
+        generation += 1
+        retry.resetBackoff()
+        retry.cancelPending()
+        teardownConnection()
+        connect()
+    }
+
+    func stop() {
+        isStarted = false
+        generation += 1
+        retry.cancelPending()
+        teardownConnection()
+        pending.removeAll()
+        pendingBytes = 0
+        readyForReplay = false
+    }
+
+    /// Enqueue or send an already-compressed payload. Never replays before the
+    /// connection is ready (and, in v2, before the `ready` control frame).
+    func send(payload: Data) {
+        guard isStarted, !blocked else { return }
+        if readyForReplay, let channel = current {
+            writeFrame(payload, on: channel)
+        } else {
+            enqueue(payload)
+        }
+    }
+
+    // MARK: Connect / reconnect
+
+    private func connect() {
+        guard isStarted, !blocked, let config = config, let host = config.host else { return }
+        readyForReplay = false
+        frameReader.reset()
+        let channel = factory.makeConnection(host: host, port: config.port, tls: config.tls)
+        current = channel
+        let g = generation
+        channel.stateHandler = { [weak self] state in
+            guard let self, self.isStarted, self.generation == g else { return }
+            self.handleState(state, channel: channel, generation: g)
+        }
+        channel.startReceiving { [weak self] data, error in
+            guard let self, self.isStarted, self.generation == g else { return }
+            self.handleInbound(data: data, error: error, generation: g)
+        }
+        channel.start()
+    }
+
+    private func handleState(_ state: ChannelState, channel: ConnectionChannel, generation g: Int) {
+        switch state {
+        case .ready:
+            retry.resetBackoff()
+            sendConnectionPackage(on: channel)
+            // Legacy (no TLS) path expects no control ACK: stream immediately.
+            // v2 waits for the `ready` control frame handled in handleInbound.
+            if config?.tls == nil {
+                markReadyAndFlush()
+            }
+        case .failed:
+            scheduleReconnect(generation: g)
+        case .waiting:
+            // NWConnection keeps retrying a waiting connection on its own; nothing to do.
+            break
+        case .cancelled:
+            break
+        }
+    }
+
+    private func handleInbound(data: Data?, error: Error?, generation g: Int) {
+        guard let data = data, error == nil else {
+            // EOF or read error enters the same reconnect path as a send failure.
+            scheduleReconnect(generation: g)
+            return
+        }
+        frameReader.append(data)
+        while let frame = frameReader.nextFrame() {
+            guard let control = ControlFrame.parse(frame) else { continue }
+            switch control {
+            case .ready:
+                markReadyAndFlush()
+            case .authError:
+                // Authentication rejected: blocked, no reconnect.
+                blocked = true
+                retry.cancelPending()
+                teardownConnection()
+            }
+        }
+    }
+
+    private func scheduleReconnect(generation g: Int) {
+        guard isStarted, !blocked, generation == g else { return }
+        teardownConnection()
+        readyForReplay = false
+        retry.scheduleRetry { [weak self] in
+            guard let self, self.isStarted, !self.blocked, self.generation == g else { return }
+            self.connect()
+        }
+    }
+
+    // MARK: Sending
+
+    private func sendConnectionPackage(on channel: ConnectionChannel) {
+        guard let config = config else { return }
+        let message = Message.buildConnectionMessage(id: config.id, item: ConnectionPackage(config: config))
+        guard let data = message.toCompressedData() else { return }
+        writeFrame(data, on: channel)
+    }
+
+    private func markReadyAndFlush() {
+        guard let channel = current else { return }
+        readyForReplay = true
+        let toFlush = pending
+        pending.removeAll()
+        pendingBytes = 0
+        for payload in toFlush { writeFrame(payload, on: channel) }
+    }
+
+    private func writeFrame(_ payload: Data, on channel: ConnectionChannel) {
+        var len = UInt64(payload.count).littleEndian
+        let header = Data(bytes: &len, count: MemoryLayout<UInt64>.size)
+        let g = generation
+        channel.send(header, isComplete: false) { _ in }
+        channel.send(payload, isComplete: true) { [weak self] error in
+            guard let self, self.isStarted, self.generation == g else { return }
+            if error != nil { self.scheduleReconnect(generation: g) }
+        }
+    }
+
+    private func enqueue(_ payload: Data) {
+        pending.append(payload)
+        pendingBytes += payload.count
+        // Enforce both budgets, dropping oldest first.
+        while (pending.count > limits.maxPendingPackages || pendingBytes > limits.maxPendingBytes),
+              !pending.isEmpty {
+            let removed = pending.removeFirst()
+            pendingBytes -= removed.count
+        }
+    }
+
+    private func teardownConnection() {
+        current?.stateHandler = nil
+        current?.cancel()
+        current = nil
+        frameReader.reset()
+    }
+
+    // MARK: - Test hooks
+    #if DEBUG
+    var test_isReadyForReplay: Bool { readyForReplay }
+    var test_isBlocked: Bool { blocked }
+    var test_pendingCount: Int { pending.count }
+    var test_pendingBytes: Int { pendingBytes }
+    var test_generation: Int { generation }
+    #endif
+}
+
+// MARK: - Production NWConnection-backed factory
+
+/// Real connections: plain TCP for the legacy Proxyman path, pinned TLS for v2.
+final class NWConnectionFactory: ConnectionFactory {
+    private let queue: DispatchQueue
+    init(queue: DispatchQueue) { self.queue = queue }
+
+    func makeConnection(host: String, port: UInt16, tls: CollectorTLS?) -> ConnectionChannel {
+        let nwPort = NWEndpoint.Port(rawValue: port) ?? NetServiceTransport.Constants.directConnectionPort
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)
+        let parameters: NWParameters = tls.map { PinnedTLS.makeParameters(host: host, tls: $0) } ?? .tcp
+        let connection = NWConnection(to: endpoint, using: parameters)
+        return NWConnectionChannel(connection: connection, queue: queue)
+    }
+}
+
+/// Adapts a single `NWConnection` to `ConnectionChannel`.
+final class NWConnectionChannel: ConnectionChannel {
+    private let connection: NWConnection
+    private let queue: DispatchQueue
+    var stateHandler: ((ChannelState) -> Void)?
+
+    init(connection: NWConnection, queue: DispatchQueue) {
+        self.connection = connection
+        self.queue = queue
+    }
+
+    func start() {
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready: self?.stateHandler?(.ready)
+            case .failed(let e): self?.stateHandler?(.failed(e))
+            case .waiting(let e): self?.stateHandler?(.waiting(e))
+            case .cancelled: self?.stateHandler?(.cancelled)
+            default: break
+            }
+        }
+        connection.start(queue: queue)
+    }
+
+    func cancel() {
+        connection.stateUpdateHandler = nil
+        connection.cancel()
+    }
+
+    func send(_ data: Data, isComplete: Bool, completion: @escaping (Error?) -> Void) {
+        connection.send(content: data, isComplete: isComplete, completion: .contentProcessed({ error in
+            completion(error)
+        }))
+    }
+
+    func startReceiving(_ handler: @escaping (Data?, Error?) -> Void) {
+        receiveLoop(handler)
+    }
+
+    private func receiveLoop(_ handler: @escaping (Data?, Error?) -> Void) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+            if let data = data, !data.isEmpty { handler(data, nil) }
+            if let error = error { handler(nil, error); return }
+            if isComplete { handler(nil, nil); return }
+            self?.receiveLoop(handler)
+        }
     }
 }
 

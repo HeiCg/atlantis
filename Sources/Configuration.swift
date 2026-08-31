@@ -29,6 +29,19 @@ struct Configuration {
     /// The official Proxyman app ignores it; a hardened collector can require it.
     let passcode: String?
 
+    /// When set, the manual connection is made over pinned TLS (collector v2) and the
+    /// transport waits for the server's `ready` control frame before replaying. `nil`
+    /// keeps the legacy plaintext Proxyman behaviour (no ACK expected).
+    let tls: CollectorTLS?
+
+    /// Capture memory limits for the hardened path. `nil` on the legacy overloads,
+    /// which keep their historical, larger ceilings untouched.
+    let limits: CaptureLimits?
+
+    /// Endpoints whose traffic must never be captured (typically the collector's own
+    /// ingest ports, so Atlantis does not record its own uploads).
+    let excludedEndpoints: [CaptureEndpoint]
+
     static func `default`(hostName: String? = nil, passcode: String? = nil) -> Configuration {
         let project = Project.current
         let deviceName = Device.current
@@ -37,11 +50,19 @@ struct Configuration {
                              hostName: hostName,
                              host: nil,
                              port: Configuration.defaultPort,
-                             passcode: passcode)
+                             passcode: passcode,
+                             tls: nil,
+                             limits: nil,
+                             excludedEndpoints: [])
     }
 
     /// Manual configuration that bypasses Bonjour and connects directly to `host:port`.
-    static func manual(host: String, port: UInt16 = Configuration.defaultPort, passcode: String? = nil) -> Configuration {
+    static func manual(host: String,
+                       port: UInt16 = Configuration.defaultPort,
+                       passcode: String? = nil,
+                       tls: CollectorTLS? = nil,
+                       limits: CaptureLimits? = nil,
+                       excludedEndpoints: [CaptureEndpoint] = []) -> Configuration {
         let project = Project.current
         let deviceName = Device.current
         return Configuration(projectName: project.name,
@@ -49,16 +70,30 @@ struct Configuration {
                              hostName: nil,
                              host: host,
                              port: port,
-                             passcode: passcode)
+                             passcode: passcode,
+                             tls: tls,
+                             limits: limits,
+                             excludedEndpoints: excludedEndpoints)
     }
 
-    private init(projectName: String, deviceName: String, hostName: String?, host: String?, port: UInt16, passcode: String?) {
+    private init(projectName: String,
+                 deviceName: String,
+                 hostName: String?,
+                 host: String?,
+                 port: UInt16,
+                 passcode: String?,
+                 tls: CollectorTLS?,
+                 limits: CaptureLimits?,
+                 excludedEndpoints: [CaptureEndpoint]) {
         self.projectName = projectName
         self.deviceName = deviceName
         self.hostName = hostName
         self.host = host
         self.port = port
         self.passcode = passcode
+        self.tls = tls
+        self.limits = limits
+        self.excludedEndpoints = excludedEndpoints
         self.id = "\(Project.current.bundleIdentifier)-\(Device.current.model)" // Use this ID to distinguish the message
     }
 }
