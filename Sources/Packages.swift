@@ -68,6 +68,14 @@ public final class TrafficPackage: Codable, CustomDebugStringConvertible, Serial
     // Should not change the variable names
     // since we're using Codable in the main app and Atlantis
 
+    // Explicit coding keys pin the wire shape to the original set. The capture-limit
+    // bookkeeping added below (captureMaxBodyBytes, bodyWasOmitted, ...) must NOT
+    // participate in Codable: without this, synthesized init(from:) would require
+    // those keys and every decode of the wire JSON (main app and tests) would throw.
+    private enum CodingKeys: String, CodingKey {
+        case id, startAt, request, response, error, responseBodyData, endAt, lastData, packageType, websocketMessagePackage
+    }
+
     public let id: String
     public private(set) var startAt: TimeInterval
     public let request: Request
@@ -78,6 +86,24 @@ public final class TrafficPackage: Codable, CustomDebugStringConvertible, Serial
     public private(set) var lastData: Data?
     public private(set) var packageType: PackageType
     private(set) var websocketMessagePackage: WebsocketMessagePackage?
+
+    // MARK: - Capture limits (collector v2)
+
+    /// Per-body retention cap. `nil` keeps the legacy behaviour (bounded only by the
+    /// 50 MB skip-at-encode ceiling). When set, response/request bodies past the cap
+    /// are dropped from capture but the app's own stream is untouched.
+    var captureMaxBodyBytes: Int?
+
+    /// Bytes of response body actually retained in memory (0 once omitted).
+    var retainedBodyBytes: Int { responseBodyData.count }
+
+    /// True when the response body exceeded `captureMaxBodyBytes` and its captured
+    /// content was released. The known total size is still tracked internally.
+    private(set) var bodyWasOmitted = false
+    private var knownResponseBodySize = 0
+
+    /// True when the request body exceeded `captureMaxBodyBytes` and was released.
+    private(set) var requestBodyWasOmitted = false
 
     // MARK: - Variables
 
@@ -158,7 +184,7 @@ public final class TrafficPackage: Codable, CustomDebugStringConvertible, Serial
         // Construct the Response without body
         self.response = Response(response)
     }
-    
+
     func updateDidComplete(_ error: Error?) {
         endAt = Date().timeIntervalSince1970
         if let error = error {
@@ -168,6 +194,16 @@ public final class TrafficPackage: Codable, CustomDebugStringConvertible, Serial
 
     func appendRequestData(_ data: Data) {
         // This func should be called in Upload Tasks
+        if let max = captureMaxBodyBytes {
+            let current = request.body?.count ?? 0
+            if requestBodyWasOmitted || current + data.count > max {
+                // Exceeded the cap: release the captured request body and keep only
+                // the omission marker. The app's request is unaffected.
+                requestBodyWasOmitted = true
+                request.resetBody()
+                return
+            }
+        }
         request.appendBody(data)
     }
 
@@ -189,12 +225,28 @@ public final class TrafficPackage: Codable, CustomDebugStringConvertible, Serial
             return
         }
         lastData = data
+
+        // Bound retained response body before appending. On exceed, release the
+        // captured content and keep only the omission marker + known size; the
+        // application's own stream (delivered by URLSession before this call) is
+        // untouched.
+        knownResponseBodySize += data.count
+        if let max = captureMaxBodyBytes {
+            if bodyWasOmitted {
+                return // already omitted; keep counting known size only
+            }
+            if responseBodyData.count + data.count > max {
+                bodyWasOmitted = true
+                responseBodyData = Data() // release captured content
+                return
+            }
+        }
         responseBodyData.append(data)
     }
 
     func toData() -> Data? {
         let request: Request
-        if isLargeRequestBody {
+        if isLargeRequestBody || requestBodyWasOmitted {
             request = Request(url: self.request.url, method: self.request.method, headers: self.request.headers, body: nil)
         } else {
             request = self.request
@@ -205,7 +257,7 @@ public final class TrafficPackage: Codable, CustomDebugStringConvertible, Serial
         // We decide to skip the body, but send the request/response
         // https://github.com/ProxymanApp/atlantis/issues/57
         let responseBodyData: Data
-        if isLargeReponseBody {
+        if isLargeReponseBody || bodyWasOmitted {
             responseBodyData = "<Skip Large Body>".data(using: String.Encoding.utf8)!
         } else {
             responseBodyData = self.responseBodyData
@@ -331,7 +383,7 @@ public final class Request: Codable {
         url = urlRequest.url?.absoluteString ?? "-"
         method = urlRequest.httpMethod ?? "-"
         headers = urlRequest.allHTTPHeaderFields?.map { Header(key: $0.key, value: $0.value ) } ?? []
-        
+
         // Try to get body from httpBody first
         if let httpBody = urlRequest.httpBody {
             body = httpBody
@@ -353,20 +405,20 @@ public final class Request: Codable {
     func resetBody() {
         self.body = nil
     }
-    
+
     // MARK: - Helper Methods
-    
+
     /// Safely reads data from an InputStream
     /// This method attempts to read data from the stream without affecting the original request
     private static func readDataFromStream(_ stream: InputStream) -> Data? {
         // Check if the stream is already open
         let wasStreamOpen = stream.streamStatus != .notOpen
-        
+
         // If the stream is not open, try to open it
         if !wasStreamOpen {
             stream.open()
         }
-        
+
         // Check if we can read from the stream
         guard stream.hasBytesAvailable || stream.streamStatus == .atEnd else {
             if !wasStreamOpen {
@@ -374,7 +426,7 @@ public final class Request: Codable {
             }
             return nil
         }
-        
+
         var data = Data()
         let bufferSize = 8192  // 8KB chunks for better performance with larger bodies
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
@@ -385,7 +437,7 @@ public final class Request: Codable {
                 stream.close()
             }
         }
-        
+
         while stream.hasBytesAvailable {
             let bytesRead = stream.read(buffer, maxLength: bufferSize)
             if bytesRead < 0 {
@@ -399,7 +451,7 @@ public final class Request: Codable {
                 data.append(buffer, count: bytesRead)
             }
         }
-        
+
         return data.isEmpty ? nil : data
     }
 }
