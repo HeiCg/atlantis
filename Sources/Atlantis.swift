@@ -129,10 +129,16 @@ public final class Atlantis: NSObject {
     /// out of the capture. Requiring `tls` keeps this overload unambiguous from the
     /// legacy plaintext `start(host:port:passcode:)` above.
     /// - Parameter passcode: the collector device token, verified by the server.
+    /// - Parameter deviceKey: optional stable device identity. When set, it becomes the
+    ///   envelope id the collector sees, so this device's Atlantis traffic is attributed
+    ///   to the same `deviceId` its ingest hello registered (one device, not two). The
+    ///   readable device name/model are unaffected. Omit (nil) to keep the SDK's historical
+    ///   `bundleId-model` id.
     public class func start(host: String,
                             port: UInt16 = 10909,
                             passcode: String?,
                             tls: CollectorTLS,
+                            deviceKey: String? = nil,
                             limits: CaptureLimits = .qa,
                             excludedEndpoints: [CaptureEndpoint] = [],
                             shouldCaptureWebSocketTraffic: Bool = true) {
@@ -141,7 +147,8 @@ public final class Atlantis: NSObject {
                                                  passcode: passcode,
                                                  tls: tls,
                                                  limits: limits,
-                                                 excludedEndpoints: excludedEndpoints)
+                                                 excludedEndpoints: excludedEndpoints,
+                                                 deviceKey: deviceKey)
         startInternal(configuration: configuration,
                       requiresBonjourService: false,
                       shouldCaptureWebSocketTraffic: shouldCaptureWebSocketTraffic)

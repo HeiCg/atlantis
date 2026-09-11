@@ -101,3 +101,39 @@ final class ConfigurationPathSelectionTests: XCTestCase {
         XCTAssertEqual(config.port, 10909)
     }
 }
+
+final class ConfigurationDeviceKeyTests: XCTestCase {
+
+    // The envelope `id` is what the collector uses to distinguish a device. A supplied
+    // deviceKey must become that id so the collector can unify this device with the
+    // ingest hello it already registered.
+
+    func testDeviceKeyBecomesEnvelopeIdWhenSet() {
+        let config = Configuration.manual(host: "10.0.0.5", tls: nil, deviceKey: "android-1kgza26-ca75c427")
+        XCTAssertEqual(config.id, "android-1kgza26-ca75c427")
+        XCTAssertEqual(config.deviceKey, "android-1kgza26-ca75c427")
+    }
+
+    func testAbsentDeviceKeyKeepsLegacyBundleModelId() {
+        // No deviceKey: the id must stay the historical bundleId-model composition,
+        // identical to what the default (Bonjour) configuration produces.
+        let manual = Configuration.manual(host: "10.0.0.5")
+        let legacy = Configuration.default()
+        XCTAssertNil(manual.deviceKey)
+        XCTAssertEqual(manual.id, legacy.id, "absent deviceKey must not change the id")
+        XCTAssertNotEqual(manual.id, "", "legacy id must be the bundleId-model composition")
+    }
+
+    func testDeviceKeyDoesNotAlterReadableDeviceNameOrModel() throws {
+        // The readable device name/model live in a separate field (ConnectionPackage.device)
+        // and must be identical with or without a deviceKey — the change is purely additive.
+        let withKey = ConnectionPackage(config: Configuration.manual(host: "h", tls: nil, deviceKey: "unified-id"))
+        let withoutKey = ConnectionPackage(config: Configuration.manual(host: "h"))
+
+        let a = try JSONDecoder().decode(DecodedConnectionPackage.self, from: try XCTUnwrap(withKey.toData()))
+        let b = try JSONDecoder().decode(DecodedConnectionPackage.self, from: try XCTUnwrap(withoutKey.toData()))
+
+        XCTAssertEqual(a.device.name, b.device.name)
+        XCTAssertEqual(a.device.model, b.device.model)
+    }
+}

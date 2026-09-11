@@ -18,6 +18,14 @@ struct Configuration {
     let id: String
     let hostName: String?
 
+    /// Optional stable device identity supplied by the host app on the hardened path.
+    /// When set, it becomes the envelope `id` (see below) so the collector attributes
+    /// this device's Atlantis traffic to the same `deviceId` its ingest hello already
+    /// registered, instead of the SDK's own `bundleId-model` id. The human-readable
+    /// device name/model still travel separately in `ConnectionPackage.device`, so this
+    /// is purely additive: `nil` keeps the historical `bundleId-model` id byte-for-byte.
+    let deviceKey: String?
+
     /// When set, Atlantis skips Bonjour discovery and connects straight to this host over TCP.
     /// It's the plan-B path for physical devices where Bonjour multicast is unavailable.
     let host: String?
@@ -53,7 +61,8 @@ struct Configuration {
                              passcode: passcode,
                              tls: nil,
                              limits: nil,
-                             excludedEndpoints: [])
+                             excludedEndpoints: [],
+                             deviceKey: nil)
     }
 
     /// Manual configuration that bypasses Bonjour and connects directly to `host:port`.
@@ -62,7 +71,8 @@ struct Configuration {
                        passcode: String? = nil,
                        tls: CollectorTLS? = nil,
                        limits: CaptureLimits? = nil,
-                       excludedEndpoints: [CaptureEndpoint] = []) -> Configuration {
+                       excludedEndpoints: [CaptureEndpoint] = [],
+                       deviceKey: String? = nil) -> Configuration {
         let project = Project.current
         let deviceName = Device.current
         return Configuration(projectName: project.name,
@@ -73,7 +83,8 @@ struct Configuration {
                              passcode: passcode,
                              tls: tls,
                              limits: limits,
-                             excludedEndpoints: excludedEndpoints)
+                             excludedEndpoints: excludedEndpoints,
+                             deviceKey: deviceKey)
     }
 
     private init(projectName: String,
@@ -84,7 +95,8 @@ struct Configuration {
                  passcode: String?,
                  tls: CollectorTLS?,
                  limits: CaptureLimits?,
-                 excludedEndpoints: [CaptureEndpoint]) {
+                 excludedEndpoints: [CaptureEndpoint],
+                 deviceKey: String?) {
         self.projectName = projectName
         self.deviceName = deviceName
         self.hostName = hostName
@@ -94,6 +106,10 @@ struct Configuration {
         self.tls = tls
         self.limits = limits
         self.excludedEndpoints = excludedEndpoints
-        self.id = "\(Project.current.bundleIdentifier)-\(Device.current.model)" // Use this ID to distinguish the message
+        self.deviceKey = deviceKey
+        // Envelope id used to distinguish the device to the receiver. A supplied
+        // deviceKey wins so the collector can unify this device with its ingest hello;
+        // otherwise keep the historical bundleId-model id, byte-for-byte.
+        self.id = deviceKey ?? "\(Project.current.bundleIdentifier)-\(Device.current.model)"
     }
 }
