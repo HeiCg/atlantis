@@ -1,0 +1,10 @@
+Atlantis (iOS)
+Copyright 2020 Proxyman LLC
+https://github.com/ProxymanApp/atlantis
+
+This product includes software developed by Proxyman LLC, licensed under
+the Apache License, Version 2.0.
+
+Modifications for the Terminus collector (pinned TLS transport, device-token
+passcode, reconnect and capture bounds) Copyright 2026 HeiCg, also licensed
+under the Apache License, Version 2.0.

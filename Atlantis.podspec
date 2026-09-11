@@ -28,9 +28,9 @@ Pod::Spec.new do |spec|
   spec.visionos.deployment_target = "1.0"
   spec.module_name = "Atlantis"
 
-  # Consumed by tag: the fork publishes argo-* release tags. s.version (1.1.1) is a
-  # valid CocoaPods semver; the tag is pinned explicitly since it is not equal to it.
-  spec.source       = { :git => "https://github.com/HeiCg/atlantis.git", :tag => "argo-1.1.1" }
+  # Consumed by tag: the fork publishes the terminus-1.0.0 release tag. s.version (1.1.1)
+  # is a valid CocoaPods semver; the tag is pinned explicitly since it is not equal to it.
+  spec.source       = { :git => "https://github.com/HeiCg/atlantis.git", :tag => "terminus-1.0.0" }
   spec.source_files = "Sources/**/*.swift"
 
   # Ship the privacy manifest to CocoaPods consumers (SPM ships it as a resource too).
