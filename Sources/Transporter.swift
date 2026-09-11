@@ -67,9 +67,12 @@ final class NetServiceTransport: NSObject {
 
     // Manual/TLS direct connection core (host != nil). Owns its own reconnect,
     // ready-gate and offline queue; the Bonjour/simulator paths above are untouched.
+    // Reconnect budget: exponential backoff 1s -> 60s ceiling, never exhausting. The
+    // core keeps retrying while started and only detaches on stop() or a terminal
+    // security error (auth/cert-pin) — see ManualTransportCore.
     private lazy var manualCore = ManualTransportCore(
         factory: NWConnectionFactory(queue: queue),
-        retry: RetryController(clock: QueueClock(queue: queue)),
+        retry: RetryController(clock: QueueClock(queue: queue), baseDelay: 1, maxDelay: 60),
         limits: .qa)
     private var isManualMode = false
 

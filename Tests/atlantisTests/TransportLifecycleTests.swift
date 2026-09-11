@@ -181,6 +181,46 @@ final class TransportLifecycleTests: XCTestCase {
         XCTAssertTrue(last.started)
     }
 
+    // MARK: - Reconnect never exhausts; 60s backoff ceiling (device-identity ticket)
+
+    // Backoff grows exponentially from the 1s base and saturates at the 60s ceiling,
+    // never beyond. This is the contract the production transport is built with
+    // (RetryController(baseDelay: 1, maxDelay: 60)).
+    func testBackoffSequenceGrowsAndCapsAt60() {
+        let clock = FakeClock()
+        let retry = RetryController(clock: clock, baseDelay: 1, maxDelay: 60, jitter: { $0 })
+        var delays: [TimeInterval] = []
+        for _ in 0..<10 {
+            delays.append(retry.nextBackoff)
+            retry.scheduleRetry {}
+        }
+        // 1, 2, 4, 8, 16, 32, then pinned at 60 forever after.
+        XCTAssertEqual(delays, [1, 2, 4, 8, 16, 32, 60, 60, 60, 60])
+    }
+
+    // While started, a transient outage never makes the core give up: after many
+    // consecutive failures it is still reconnecting and never enters the blocked state.
+    func testNeverExhaustsAfterManyFailuresWhileStarted() {
+        let clock = FakeClock()
+        let connections = FakeConnections()
+        // Production ceiling: 60s, no maxRetries.
+        let retry = RetryController(clock: clock, baseDelay: 1, maxDelay: 60, jitter: { $0 })
+        let transport = ManualTransportCore(factory: connections, retry: retry)
+        transport.start(Configuration.manual(host: "h", port: 1))
+
+        // Far more failures than the old fixed budget (was 5) ever allowed.
+        for _ in 0..<30 {
+            connections.failCurrent()
+            clock.advance(by: 60) // long enough to fire even a ceiling-capped retry
+        }
+        XCTAssertFalse(transport.test_isBlocked, "a transient outage must never block")
+        XCTAssertGreaterThan(connections.createdCount, 30, "must keep reconnecting, never exhaust")
+
+        // And it still recovers when the collector returns.
+        connections.current!.becomeReady()
+        XCTAssertTrue(connections.current!.started)
+    }
+
     // MARK: - Ready gate
 
     func testTLSModeDoesNotReplayBeforeReadyControlFrame() {

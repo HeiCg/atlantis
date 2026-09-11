@@ -64,7 +64,7 @@ final class RetryController {
     ///   tests get deterministic timing; production adds randomised jitter.
     init(clock: SchedulerClock,
          baseDelay: TimeInterval = 1.0,
-         maxDelay: TimeInterval = 30.0,
+         maxDelay: TimeInterval = 60.0,
          jitter: @escaping (TimeInterval) -> TimeInterval = RetryController.defaultJitter) {
         self.clock = clock
         self.baseDelay = baseDelay
